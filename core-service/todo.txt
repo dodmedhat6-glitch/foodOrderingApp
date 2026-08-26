@@ -1,0 +1,12 @@
+Outcome the frist : 
+1- Auth system(signUp , login , reset pass) 
+2- Users (me and update)
+3- Customer addresses
+----------------------------------
+
+1. create database tabels for users , Customer_addresses , reset_pass
+--
+1.implement Auth system
+2.implement Users module
+3.implement Customer addresses
+3.test were everything
