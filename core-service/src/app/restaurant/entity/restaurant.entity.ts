@@ -3,9 +3,9 @@ import {RestaurantStatus} from "../enums";
 
 export class RestaurantEntity{
     id :number;
-    owner_id: number;
+    ownerId: number;
     name: string;
-    logoUrl:string;
+    logoURL:string;
     status: RestaurantStatus;
     primaryCountry:string;
     createdAt: Date;
@@ -14,9 +14,9 @@ export class RestaurantEntity{
 
     constructor(data : Partial<RestaurantEntity>) {
         this.id = data.id!;
-        this.owner_id = data.owner_id!;
+        this.ownerId = data.ownerId!;
         this.name = data.name!;
-        this.logoUrl = data.logoUrl ?? '';
+        this.logoURL = data.logoURL ?? '';
         this.status = data.status!;
         this.primaryCountry= data.primaryCountry!;
         this.createdAt= data.createdAt ?? new Date();

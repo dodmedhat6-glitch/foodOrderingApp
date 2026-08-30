@@ -1,5 +1,6 @@
 import { db } from "../../../common/knex/kenx"
 import { User } from "../entity/user.entity";
+import {Knex} from "knex";
 
 
 const USER_COLUMNS = [
@@ -61,9 +62,9 @@ export async function IsUserExistsByEmailOrPhone(email: string, phone: string): 
 }
 
 
-export async function insertUser(user: Partial<User>): Promise<User> {
+export async function insertUser(user: Partial<User> , conn: Knex = db): Promise<User> {
     // Implement the logic to insert a new user into the database
-    const [row] = await db("users").insert({
+    const [row] = await conn("users").insert({
         email: user.email,
         phone: user.phone,
         name: user.name,
