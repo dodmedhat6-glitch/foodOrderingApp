@@ -1,9 +1,11 @@
 import {
-    IsEmail, MinLength, IsString,
-    IsStrongPassword, MaxLength, IsEnum, IsNotEmpty, Length
+    IsEmail, MinLength, IsString,ValidationTypes,
+    IsStrongPassword, MaxLength, IsEnum, IsNotEmpty, Length, IsOptional, ValidateNested
 } from 'class-validator';
 
 import { SystemRole } from '../../user/enums'
+import {type} from "node:os";
+import {Type} from "class-transformer";
 
 export class RegisterDto {
     @IsEmail()
@@ -29,6 +31,11 @@ export class RegisterDto {
 
     @IsEnum(SystemRole)
     role!: SystemRole;
+
+    @IsOptional()
+    @ValidateNested()
+    @Type(() => RegisterRestaurantDto)
+    restaurant?:RegisterRestaurantDto
 
 }
 
@@ -64,4 +71,22 @@ export class ResetPasswordDto {
         { message: 'password is not strong enough' }
     )
     newPassword!: string;
+}
+
+
+export class RegisterRestaurantDto {
+
+
+    @MinLength(1)
+    @IsString()
+    name!: string;
+
+    @IsOptional()
+    @IsString()
+    logoURL?:string;
+
+    @IsString()
+    @MinLength(1)
+    primaryCountry?:string;
+
 }

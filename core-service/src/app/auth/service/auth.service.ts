@@ -1,29 +1,43 @@
-import { RegisterDto, LoginDto, PasswordForgetDto, ResetPasswordDto } from '../dto/auth.dto.js';
+import {LoginDto, PasswordForgetDto, RegisterDto, ResetPasswordDto} from '../dto/auth.dto.js';
 
 import {
-    findUserByEmail, IsUserExistsByEmailOrPhone,
-    insertUser, updateUserPassword
+    findUserByEmail,
+    insertUser,
+    IsUserExistsByEmailOrPhone,
+    updateUserPassword
 } from '../../user/repository/user.repo.js';
 
 import {
-    UserAlreadyExistsError, CannotSignupAsAdmin
-    , IncorrectCredentials, InvalidOTP
+    CannotSignupAsAdmin,
+    IncorrectCredentials,
+    InvalidOTP,
+    RestaurantDataRequiredError,
+    UserAlreadyExistsError
 } from '../error.js'
 
 import {
-    HashPassword, creatAccessToken, creatRefreshToken, verifyRefreshToken
-    , comparePassword, generateOTP, hashOTP
+    comparePassword,
+    creatAccessToken,
+    creatRefreshToken,
+    generateOTP,
+    hashOTP,
+    HashPassword,
+    verifyRefreshToken
 } from '../utils.js'
 import {
     createResetPassword,
     findLatestPasswordResetByUserId,
     updatePasswordResetConsumedAt
 } from '../repo/reset_password.repo.js'
-import { SystemRole } from '../../user/enums.js'
-import { NotAuthenticated } from '../../../common/auth/error.js';
+import {SystemRole} from '../../user/enums.js'
+import {NotAuthenticated} from '../../../common/auth/error.js';
+import {restaurantService, RestaurantService} from "../../restaurant/service/restaurant.service";
+import {db} from "../../../common/knex/kenx";
 
 
 export class AuthService {
+    constructor(private readonly restaurantService:RestaurantService ) {
+    }
 
     register = async (data: RegisterDto) => {
         if (data.role == SystemRole.SYSTEM_ADMIN) {
@@ -42,17 +56,36 @@ export class AuthService {
         const hashedPassword = await HashPassword(data.password)
 
         //4.create a new user in the database
-        const now = new Date()
-        const user = await insertUser({
-            email: data.email,
-            phone: data.phone,
-            name: data.name,
-            passwordHash: hashedPassword,
-            systemRole: data.role,
-            createdAt: now,
-            updatedAt: now
-        })
 
+        const now = new Date()
+        const trx = await db.transaction();
+        let user
+        let restaurant
+        try {
+             user = await insertUser({
+                email: data.email,
+                phone: data.phone,
+                name: data.name,
+                passwordHash: hashedPassword,
+                systemRole: data.role,
+                createdAt: now,
+                updatedAt: now
+            }, trx)
+            //check if the type of user is restaurant , then call restaurant service to create a new restaurant
+
+            if (data.role == SystemRole.RESTAURANT_USER){
+                if(data.restaurant == undefined){
+                    throw RestaurantDataRequiredError
+                }
+               restaurant= await this.restaurantService.create(user.id,data.restaurant,trx)
+                }
+            await trx.commit();
+        }
+
+        catch(error){
+            await trx.rollback()
+            throw error
+        }
 
         //5.create a JWT token for the user, access and refresh token
         const payload = { user_id: user.id, role: data.role, email: user.email };
@@ -69,7 +102,8 @@ export class AuthService {
                 email: user.email,
                 phone: user.phone,
                 SystemRole: user.systemRole
-            }
+            },
+            restaurant
         }
     }
 
@@ -173,4 +207,4 @@ export class AuthService {
 
 }
 
-export const authService = new AuthService();
+export const authService = new AuthService(restaurantService);
