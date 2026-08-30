@@ -1,0 +1,7 @@
+{
+  "name": "food-ordering-app",
+  "private": true,
+  "scripts": {
+    "knex": "npm --prefix core-service run knex --"
+  }
+}
