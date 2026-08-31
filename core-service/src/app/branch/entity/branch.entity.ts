@@ -1,10 +1,10 @@
-import {currencyEnum} from "../enums";
+import {Currency} from "../enums";
 
-export class BranchEntity{
+export class Branch {
     id: number;
     restaurantId: number;
     countryCode: string;
-    addressText: string;
+    addressText:string;
     label: string;
     lat: number;
     lng: number;
@@ -14,11 +14,12 @@ export class BranchEntity{
     acceptOrders: boolean;
     createdAt: Date;
     updatedAt: Date;
-    deliveryRadius: number;
-    currency: currencyEnum;
+    deliveryRadius: number; // km
+    currency: Currency
     commission: number;
+    location?: String;
 
-    constructor(data: Partial<BranchEntity>) {
+    constructor(data: Partial<Branch>) {
         this.id = data.id!;
         this.restaurantId = data.restaurantId!;
         this.countryCode = data.countryCode!;
@@ -26,14 +27,14 @@ export class BranchEntity{
         this.label = data.label!;
         this.lat = data.lat!;
         this.lng = data.lng!;
-        this.isActive = data.isActive! ?? false;
+        this.isActive = data.isActive!;
         this.opensAt = data.opensAt!;
         this.closesAt = data.closesAt!;
         this.acceptOrders = data.acceptOrders!;
-        this.createdAt = data.createdAt! ?? new Date();
-        this.updatedAt = data.updatedAt! ?? new Date();
-        this.deliveryRadius = data.deliveryRadius!;
+        this.createdAt = data.createdAt ?? new Date();
+        this.updatedAt = data.updatedAt ?? new Date();
+        this.deliveryRadius = data.deliveryRadius ?? 0;
         this.currency = data.currency!;
-        this.commission = data.commission! ?? 0;
+        this.commission = data.commission ?? 0;
     }
 }

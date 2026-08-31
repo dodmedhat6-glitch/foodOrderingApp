@@ -36,7 +36,7 @@ export async function findAllRestaurants(): Promise<RestaurantEntity[]>{
 }
 
 // TODO: find restaurant by id
-export async function findRestaurantsById(id:number): Promise<RestaurantEntity>{
+export async function findRestaurantById(id:number): Promise<RestaurantEntity>{
     const row = await db('restaurants').select(RESTAURANT_COLUMNS).where("id",id).first();
     return toEntity(row)
 }
