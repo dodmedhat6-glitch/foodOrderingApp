@@ -33,6 +33,7 @@ import {SystemRole} from '../../user/enums.js'
 import {NotAuthenticated} from '../../../common/auth/error.js';
 import {restaurantService, RestaurantService} from "../../restaurant/service/restaurant.service";
 import {db} from "../../../common/knex/kenx";
+import {minutes} from "../../../common/times";
 
 
 export class AuthService {
@@ -155,7 +156,7 @@ export class AuthService {
         await createResetPassword({
             userId: user.id,
             otpHash: hashedOTP,
-            expiresAt: new Date(Date.now() + (10 * 60 * 1000)),//10 min
+            expiresAt: new Date(Date.now() + minutes(10)),//10 min
             createdAt: new Date()
         })
         // TODO : SEND EMAIL
