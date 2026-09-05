@@ -92,24 +92,6 @@ export class RegisterRestaurantDto {
 }
 
 
-export class acceptInviteDto{
-    @IsEmail()
-    email!: string;
-
-    @IsString()
-    @Length(6)
-    otp!: string;
-
-    @IsStrongPassword({
-            minLength: 8,
-            minLowercase: 1,
-            minUppercase: 1,
-            minNumbers: 1
-        },
-        { message: 'password is not strong enough' }
-    )
-    password!: string;
-}
 
 
 
