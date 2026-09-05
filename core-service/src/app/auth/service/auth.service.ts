@@ -34,6 +34,7 @@ import {NotAuthenticated} from '../../../common/auth/error.js';
 import {restaurantService, RestaurantService} from "../../restaurant/service/restaurant.service";
 import {db} from "../../../common/knex/kenx";
 import {minutes} from "../../../common/times";
+import {activateMemberByUserId} from "../../rbac/repository/restaurant_member.repo";
 
 
 export class AuthService {
@@ -187,6 +188,8 @@ export class AuthService {
         // update reset password
         await updatePasswordResetConsumedAt(reset.id)
 
+        return user.id
+
 
     }
 
@@ -204,6 +207,15 @@ export class AuthService {
         } catch {
             throw NotAuthenticated
         }
+    }
+
+    acceptInvite = async (data: ResetPasswordDto) =>{
+
+        // in this function we can use the same service we used in reset password service
+        const user = await this.resetPassword(data)
+
+        // the last thing we need to active user
+        await activateMemberByUserId(user)
     }
 
 }

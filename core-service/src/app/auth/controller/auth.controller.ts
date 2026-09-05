@@ -86,6 +86,19 @@ export class AuthController {
         }
     }
 
+    acceptInvite = async (req: Request, res: Response, next: NextFunction) => {
+        try {
+            const data = await validateBody(ResetPasswordDto, req.body);
+            await this.authService.acceptInvite(data)
+            res.status(200).json({
+                "message": "invitation accepted successfully , please login "
+            })
+        }
+        catch (err) {
+            next(err)
+        }
+    }
+
 }
 
 export const authController = new AuthController(authService)
