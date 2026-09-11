@@ -23,6 +23,12 @@ export async function setMemberBranch(memberId :number , rows: MemberBranchEntit
         }))
         );
     }
+}
 
 
+export async function findBranchesByMemberId(memberId: number): Promise<number[]> {
+    const row = await db("member_branches")
+        .select("branch_id")
+        .where("member_id", memberId);
+    return row.map(row => row.branch_id);
 }

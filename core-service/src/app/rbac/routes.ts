@@ -1,9 +1,14 @@
 import {Router} from "express";
 import {authenticate} from "../../common/auth/guard";
 import {memberController} from "./controller/member.controller";
+import {rbac, requireRestaurantMember} from "../../common/auth/rbac.middelwares";
 
 export const rbacRouter = Router();
 
-rbacRouter.post('/restuarants/:restaurantId/members' , authenticate , memberController.createMember )
+rbacRouter.post('/restaurants/:restaurantId/members'
+    ,authenticate
+    ,requireRestaurantMember('restaurantId')
+    ,rbac({resource:"core:member" , action: 'create'})
+    , memberController.createMember )
 
 //TODO : PUT '/restaurnat/{restaurantId}/members/{memberId/branches'

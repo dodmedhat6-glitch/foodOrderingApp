@@ -34,7 +34,8 @@ import {NotAuthenticated} from '../../../common/auth/error.js';
 import {restaurantService, RestaurantService} from "../../restaurant/service/restaurant.service";
 import {db} from "../../../common/knex/kenx";
 import {minutes} from "../../../common/times";
-import {activateMemberByUserId} from "../../rbac/repository/restaurant_member.repo";
+import {activateMemberByUserId, findRestaurantMemberWithRole} from "../../rbac/repository/restaurant_member.repo";
+import {findBranchesByMemberId} from "../../rbac/repository/member_branch.repo";
 
 
 export class AuthService {
@@ -122,8 +123,22 @@ export class AuthService {
         if (!matchPassword) {
             throw IncorrectCredentials
         }
+
+        // in case the user is restaurant user
+        let restaurantMemberInfo = null;
+        if (user.systemRole == SystemRole.RESTAURANT_USER){
+            const memberData = await findRestaurantMemberWithRole(user.id);
+            if(memberData){
+                const branchIds = await  findBranchesByMemberId(memberData.member.id);
+                restaurantMemberInfo = {
+                    restaurantId: memberData.member.restaurantId,
+                    restaurantRole: memberData.roleName,
+                    branchIds
+                }
+            }
+        }
         // generate token
-        const payload = { user_id: user.id, role: user.systemRole, email: user.email };
+        const payload = { user_id: user.id, role: user.systemRole, email: user.email  , ...restaurantMemberInfo };
         const accessToken = creatAccessToken(payload);
         const refreshToken = creatRefreshToken(payload);
 

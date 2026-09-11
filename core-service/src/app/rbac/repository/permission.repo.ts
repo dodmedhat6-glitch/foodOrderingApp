@@ -17,7 +17,7 @@ export async function getPermissionByRoleName(roleName: string , trx? :Knex.Tran
 
     const row = await query("permissions as p")
         .select("p.id" , "p.resource" , "p.action", "p.created_at")
-        .join("role_permission as rp" , "p.id" , "rp.permission_id")
+        .join("role_permissions as rp" , "p.id" , "rp.permission_id")
         .join("roles as r" , "rp.role_id" , "r.id")
         .where("r.name" , roleName)
 

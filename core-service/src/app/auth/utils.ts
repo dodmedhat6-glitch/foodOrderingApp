@@ -11,6 +11,10 @@ export interface JwtPayload {
     user_id: number;
     email: string;
     role: string;
+    // for restaurant user only
+    restaurantId?:number;
+    restaurantRole?:string;
+    branchIds?:number[];
 }
 
 export function creatAccessToken(payload: JwtPayload): string {
