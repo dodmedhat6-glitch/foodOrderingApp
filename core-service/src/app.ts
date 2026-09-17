@@ -1,7 +1,7 @@
 import express from 'express';
 import { router } from './routes.js';
-import { errorHandler } from './common/error/errorHandler.js';
-import {correlationIdMiddleware} from "./common/correlationId/correlationId";
+import { errorHandler } from './lib/error/errorHandler.js';
+import {correlationIdMiddleware} from "./lib/correlationId/correlationId";
 import cookieParser from "cookie-parser"
 export function createApp() {
     const app = express();

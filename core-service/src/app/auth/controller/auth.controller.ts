@@ -1,13 +1,16 @@
-import { AuthService, authService } from "../service/auth.service"
+import { AuthService } from "../service/auth.service"
 import { Request, Response, NextFunction } from "express"
 import { LoginDto, RegisterDto, PasswordForgetDto, ResetPasswordDto } from "../dto/auth.dto"
-import { validateBody } from "../../../common/validation/validate"
-import { setAuthCookies } from "../../../common/auth/guard"
-import { NotAuthenticated } from "../../../common/auth/error"
+import { validateBody } from "../../../lib/validation/validate"
+import { setAuthCookies } from "../../../lib/auth/guard"
+import { NotAuthenticated } from "../../../lib/auth/error"
+import {inject, injectable} from "tsyringe";
+import {tokens} from "../../../lib/di/tokens";
 
+@injectable()
 export class AuthController {
 
-    constructor(private readonly authService: AuthService) {
+    constructor(@inject(tokens.AuthService) private readonly authService: AuthService) {
 
     }
 
@@ -100,5 +103,3 @@ export class AuthController {
     }
 
 }
-
-export const authController = new AuthController(authService)

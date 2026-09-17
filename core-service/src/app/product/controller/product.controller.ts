@@ -1,11 +1,14 @@
 import {Request, Response, NextFunction} from "express";
-import {validateBody} from "../../../common/validation/validate";
+import {validateBody} from "../../../lib/validation/validate";
 import {SystemRole} from "../../user/enums";
 import {CreateProductDTO, UpdateProductDTO} from "../dto/product.dto";
-import {ProductService, productService} from "../service/product.service";
+import {ProductService} from "../service/product.service";
+import {inject, injectable} from "tsyringe";
+import {tokens} from "../../../lib/di/tokens";
 
+@injectable()
 export class ProductController {
-    constructor(private readonly productService: ProductService) {}
+    constructor(@inject(tokens.ProductService) private readonly productService: ProductService) {}
 
     create = async (req: Request, res: Response, next: NextFunction) => {
         try {
@@ -79,5 +82,3 @@ export class ProductController {
         }
     }
 }
-
-export const productController = new ProductController(productService);

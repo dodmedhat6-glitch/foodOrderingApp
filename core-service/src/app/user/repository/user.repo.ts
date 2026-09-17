@@ -1,4 +1,4 @@
-import { db } from "../../../common/knex/kenx"
+import { db } from "../../../lib/knex/kenx"
 import { User } from "../entity/user.entity";
 import {Knex} from "knex";
 

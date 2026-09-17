@@ -1,7 +1,10 @@
 import { UserNotFound } from "../errors"
 import { findUserById , updateUser } from "../repository/user.repo"
 import {UpdateUserDto} from "../dto/user.dto";
+import {injectable} from "tsyringe";
 
+
+@injectable()
 export class UserService {
 
     findByUserId = async (userId: number) => {
@@ -29,5 +32,3 @@ export class UserService {
 }
 }
 
-
-export const userService = new UserService()

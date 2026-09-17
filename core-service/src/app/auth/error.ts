@@ -1,4 +1,4 @@
-import { AppError } from '../../common/error/AppError'
+import { AppError } from '../../lib/error/AppError'
 
 export const UserAlreadyExistsError = new AppError('User Already exists with same phone or email', 400);
 export const CannotSignupAsAdmin = new AppError('unauthorized', 403)

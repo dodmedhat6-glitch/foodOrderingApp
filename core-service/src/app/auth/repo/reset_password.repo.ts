@@ -1,4 +1,4 @@
-import { db } from "../../../common/knex/kenx"
+import { db } from "../../../lib/knex/kenx"
 import { PasswordReset } from "../entity/password_reset.entity"
 import {Knex} from "knex";
 

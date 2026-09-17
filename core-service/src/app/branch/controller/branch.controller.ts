@@ -1,8 +1,10 @@
 import {Request, Response, NextFunction} from "express";
-import {validateBody} from "../../../common/validation/validate";
+import {validateBody} from "../../../lib/validation/validate";
 import {SystemRole} from "../../user/enums";
 import {CreateBranchDTO, UpdateBranchDTO, UpdateBranchStatusDTO} from "../dto/branch.dto";
-import {BranchService, branchService} from "../service/branch.service";
+import {BranchService} from "../service/branch.service";
+import {inject, injectable} from "tsyringe";
+import {tokens} from "../../../lib/di/tokens";
 
 function normalizeTime(value: unknown): unknown {
     if (typeof value !== "string") {
@@ -35,8 +37,9 @@ function normalizeBranchBody(body: unknown): unknown {
     return normalized;
 }
 
+@injectable()
 export class BranchController {
-    constructor(private readonly branchService: BranchService) {
+    constructor(@inject(tokens.BranchService) private readonly branchService: BranchService) {
     }
 
     create = async (req: Request, res: Response, next: NextFunction) => {
@@ -71,7 +74,7 @@ export class BranchController {
     update = async (req: Request, res: Response, next: NextFunction) => {
         try {
             const data = await validateBody(UpdateBranchDTO, normalizeBranchBody(req.body));
-            const branch = await this.branchService.update(Number(req.params.id), req.user?.user_id!, req.user?.role! as SystemRole, data);
+            const branch = await this.branchService.update(Number(req.params.branchId), req.user?.user_id!, req.user?.role! as SystemRole, data);
             res.status(200).json({message: "Branch updated", branch});
         } catch (err) {
             next(err);
@@ -81,12 +84,10 @@ export class BranchController {
     updateStatus = async (req: Request, res: Response, next: NextFunction) => {
         try {
             const data = await validateBody(UpdateBranchStatusDTO, req.body);
-            const branch = await this.branchService.updateStatus(Number(req.params.id), req.user?.role! as SystemRole, data);
+            const branch = await this.branchService.updateStatus(Number(req.params.branchId), req.user?.role! as SystemRole, data);
             res.status(200).json({message: "Branch status updated", branch: {id: branch.id, isActive: branch.isActive, acceptOrders: branch.acceptOrders, commission: branch.commission}});
         } catch (err) {
             next(err);
         }
     }
 }
-
-export const branchController = new BranchController(branchService)

@@ -1,6 +1,6 @@
 import {PermissionEntity} from "../entity/permission.entity";
 import {Knex} from "knex";
-import {db} from "../../../common/knex/kenx";
+import {db} from "../../../lib/knex/kenx";
 
 function toEntity(row: any): PermissionEntity{
     return new PermissionEntity({
@@ -24,6 +24,17 @@ export async function getPermissionByRoleName(roleName: string , trx? :Knex.Tran
     return row.map(row =>{
         const entity = toEntity(row);
         return `${entity.resource}:${entity.action}`
-    })
+    });
 
+}
+
+export async function getPermissionsDetailsByRoleName(roleName: string): Promise<{permission: string}[]> {
+    const rows = await db("permissions as p")
+        .select("p.resource", "p.action")
+        .join("role_permissions as rp", "p.id", "rp.permission_id")
+        .join("roles as r", "rp.role_id", "r.id")
+        .where("r.name", roleName);
+    return rows.map(row => ({
+        permission: `${row.resource}:${row.action}`,
+    }));
 }

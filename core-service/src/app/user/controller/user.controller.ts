@@ -1,9 +1,11 @@
 import { NextFunction, Request, Response } from "express"
-import { UserService, userService } from "../service/user.service"
+import { UserService } from "../service/user.service"
+import {inject, injectable} from "tsyringe";
+import {tokens} from "../../../lib/di/tokens";
 
-
+@injectable()
 export class UserController {
-    constructor(private readonly userService: UserService) { }
+    constructor(@inject(tokens.UserService) private readonly userService: UserService) { }
 
     getMe = async (req: Request, res: Response, next: NextFunction) => {
         try {
@@ -36,5 +38,3 @@ export class UserController {
         }
     }
 }
-
-export const userController = new UserController(userService)

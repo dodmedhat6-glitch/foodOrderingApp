@@ -1,7 +1,7 @@
 import { NextFunction, Response, Request } from "express";
 import { NotAuthenticated } from "./error";
 import { verifyAccessToken } from "../../app/auth/utils";
-import { days, hours } from "../times"
+import { days, hours } from "../../pkg/utils/times"
 
 export function authenticate(req: Request, res: Response, next: NextFunction) {
     const token = req.cookies.access_token;

@@ -1,4 +1,4 @@
-import { env } from '../../common/config/env'
+import { env } from '../../lib/config/env'
 import jwt, { SignOptions } from "jsonwebtoken"
 import bcrypt from 'bcrypt'
 import { createHash, randomInt } from 'node:crypto'

@@ -30,23 +30,29 @@ import {
     updatePasswordResetConsumedAt
 } from '../repo/reset_password.repo.js'
 import {SystemRole} from '../../user/enums.js'
-import {NotAuthenticated} from '../../../common/auth/error.js';
-import {restaurantService, RestaurantService} from "../../restaurant/service/restaurant.service";
-import {db} from "../../../common/knex/kenx";
-import {minutes} from "../../../common/times";
+import {NotAuthenticated} from '../../../lib/auth/error.js';
+import {RestaurantService} from "../../restaurant/service/restaurant.service";
+import {db} from "../../../lib/knex/kenx";
+import {minutes} from "../../../pkg/utils/times";
 import {activateMemberByUserId, findRestaurantMemberWithRole} from "../../rbac/repository/restaurant_member.repo";
 import {findBranchesByMemberId} from "../../rbac/repository/member_branch.repo";
+import {inject, injectable} from "tsyringe";
+import {tokens} from "../../../lib/di/tokens";
+import {UserService} from "../../user/service/user.service";
+import {MemberService} from "../../rbac/service/member.service";
 
-
+@injectable()
 export class AuthService {
-    constructor(private readonly restaurantService:RestaurantService ) {
-    }
+    constructor(
+        @inject(tokens.RestaurantService) private readonly restaurantService : RestaurantService,
+        @inject(tokens.UserService) private readonly userService: UserService,
+        @inject(tokens.MemberService) private readonly memberBranchService: MemberService
+    ){}
 
     register = async (data: RegisterDto) => {
         if (data.role == SystemRole.SYSTEM_ADMIN) {
             throw CannotSignupAsAdmin
         }
-
         //1.check if user already exists
         const existing = await IsUserExistsByEmailOrPhone(data.email, data.phone);
 
@@ -234,5 +240,3 @@ export class AuthService {
     }
 
 }
-
-export const authService = new AuthService(restaurantService);

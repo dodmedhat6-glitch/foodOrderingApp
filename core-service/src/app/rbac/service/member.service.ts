@@ -1,19 +1,32 @@
-import {CannotCreateOwnerUserError, RoleNotFound} from "../errors";
+import {
+    CannotCreateOwnerUserError,
+    CannotDeleteOwnerUser, InvalidBranchIdsError,
+    MemberNotFound,
+    RoleNotFound,
+    RoleNotFoundError
+} from "../errors";
 import {findUserByEmail, insertUser} from "../../user/repository/user.repo";
 import {UserAlreadyExistsError} from "../../auth/error";
 import {findRoleByName} from "../repository/role.repo";
-import {db} from "../../../common/knex/kenx";
-import {CreateMemberDto} from "../dto/member.dto";
+import {db} from "../../../lib/knex/kenx";
+import {CreateMemberDto, UpdateMemberBranchesDTO, UpdateMemberDto} from "../dto/member.dto";
 import {SystemRole} from "../../user/enums";
-import {createRestaurantMember} from "../repository/restaurant_member.repo";
+import {
+    createRestaurantMember, deleteMember,
+    findMembersByRestaurantId,
+    findRestaurantMemberWithRole, updateMember
+} from "../repository/restaurant_member.repo";
 import {RestaurantMemberStatus} from "../enums";
-import {setMemberBranch} from "../repository/member_branch.repo";
+import {countBranchesByIdsAndRestaurant, setMemberBranch} from "../repository/member_branch.repo";
 import {generateOTP, hashOTP} from "../../auth/utils";
 import {createResetPassword} from "../../auth/repo/reset_password.repo";
-import {minutes} from "../../../common/times";
+import {minutes} from "../../../pkg/utils/times";
 import {MemberBranchEntity} from "../entity/member-branch.entity";
+import {AppError} from "../../../lib/error/AppError";
+import {getPermissionsDetailsByRoleName} from "../repository/permission.repo";
+import {injectable} from "tsyringe";
 
-
+@injectable()
 export  class MemberService{
     async createMember(restaurantId:number , data: CreateMemberDto) {
             // don't accept owner role creation
@@ -87,12 +100,88 @@ export  class MemberService{
 
     //TODO : PUT RESTAURANT MEMBER BRANCHES SERVICE
 
+    async listMember(restaurantId : number) {
+        const list = await findMembersByRestaurantId(restaurantId);
+        return {data : list};
+    }
+
+
+
+    async updateMember(restaurantId: number, memberId: number, data: UpdateMemberDto) {
+        // single query: member + role name
+        const result = await findRestaurantMemberWithRole(memberId);
+        if (!result || Number(result.member.restaurantId) !== Number(restaurantId)) {
+            throw MemberNotFound;
+        }
+
+        const updateData: {roleId?: number, status?: string} = {};
+        if (data.role) {
+            const roleId = await findRoleByName(data.role);
+            if (!roleId) throw RoleNotFoundError;
+            updateData.roleId = roleId;
+        }
+        if (data.status) {
+            updateData.status = data.status;
+        }
+
+        await updateMember(memberId, updateData);
+        return {message: "Member updated successfully"};
+    }
+
+
+    async deleteMember(restaurantId: number, memberId: number) {
+        // single query: member + role name (no N+1)
+        const result = await findRestaurantMemberWithRole(memberId);
+        if (!result || Number(result.member.restaurantId) !== Number(restaurantId)) {
+            throw MemberNotFound;
+        }
+        if (result.roleName === 'owner') {
+            throw CannotDeleteOwnerUser;
+        }
+        await deleteMember(memberId);
+        return {message: "Member deleted successfully"};
+    }
+
+    async updateMemberBranches(restaurantId: number, memberId: number, data: UpdateMemberBranchesDTO) {
+        // single query: member + role name (no N+1)
+        const result = await findRestaurantMemberWithRole(memberId);
+        if (!result || Number(result.member.restaurantId) !== Number(restaurantId)) {
+            throw MemberNotFound;
+        }
+        if (result.roleName === 'owner') {
+            throw new AppError('Cannot assign branches to owners, they have access to all branches', 400);
+        }
+
+        // validate branchIds belong to this restaurant (single COUNT query)
+        await this.validateBranchOwnership(data.branchIds, restaurantId);
+
+        const now = new Date();
+        const rows = data.branchIds.map(branchId => new MemberBranchEntity({
+            branchId,
+            memberId: result.member.id,
+            createdAt: now,
+        }));
+        await setMemberBranch(memberId, rows);
+
+        return {
+            message: "Member branch assignments updated successfully",
+            branchIds: data.branchIds,
+        };
+    }
+    async getRolePermissions(roleName: string) {
+        const permissions = await getPermissionsDetailsByRoleName(roleName);
+        return {role: roleName, permissions};
+    }
+
+    async validateBranchOwnership(branchIds: number[], restaurantId: number) {
+        if (branchIds.length === 0) return;
+        const count = await countBranchesByIdsAndRestaurant(branchIds, restaurantId);
+        if (count !== branchIds.length) {
+            throw InvalidBranchIdsError;
+        }
+    }
 
 }
-
-export const memberService = new MemberService()
-
-
 
 
 

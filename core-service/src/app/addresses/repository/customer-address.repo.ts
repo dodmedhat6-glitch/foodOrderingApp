@@ -1,4 +1,4 @@
-import {db} from "../../../common/knex/kenx";
+import {db} from "../../../lib/knex/kenx";
 import {CustomerAddress} from "../entity/customer-address.entity";
 
 const ADDRESS_COLUMNS = [

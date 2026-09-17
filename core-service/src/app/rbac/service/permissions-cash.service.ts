@@ -1,7 +1,9 @@
-import {hours} from "../../../common/times";
+import {hours} from "../../../pkg/utils/times";
 import {getPermissionByRoleName} from "../repository/permission.repo";
+import {injectable} from "tsyringe";
 
-class PermissionsCashService{
+@injectable()
+export class PermissionsCashService{
     private cache:Map<string , {permissions: string[] , cachedAt:number}> = new Map();
     private readonly TTL = hours(1)
 
@@ -22,6 +24,3 @@ class PermissionsCashService{
         return permissions.includes(`${resource}:${action}`);
     }
 }
-
-
-export const permissionCashService = new PermissionsCashService()
