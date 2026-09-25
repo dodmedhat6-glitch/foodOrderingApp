@@ -1,4 +1,4 @@
-import {db} from "../../../lib/knex/knex";
+import {db} from "../../../lib/knex/kenx";
 import {Product} from "../entity/product.entity";
 
 const PRODUCT_COLUMNS = ['id', 'name', 'description', 'image_url', 'restaurant_id', 'category_id', 'created_at', 'updated_at', 'deleted_at'];

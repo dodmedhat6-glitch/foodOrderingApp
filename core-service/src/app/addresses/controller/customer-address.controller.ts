@@ -4,6 +4,7 @@ import {validateBody} from "../../../lib/validation/validate";
 import {CreateAddressDTO, UpdateAddressDTO} from "../dto/customer-address.dto";
 import {inject, injectable} from "tsyringe";
 import {tokens} from "../../../lib/di/tokens";
+import {sendSuccess} from "../../../lib/http/response";
 
 @injectable()
 export class CustomerAddressController {
@@ -12,7 +13,7 @@ export class CustomerAddressController {
     getAll = async (req: Request, res: Response, next: NextFunction) => {
         try {
             const addresses = await this.customerAddressService.getByUserId(req.user?.user_id!);
-            res.status(200).json({data: addresses});
+            sendSuccess(res, addresses);
         } catch (err) {
             next(err);
         }
@@ -22,7 +23,7 @@ export class CustomerAddressController {
         try {
             const data = await validateBody(CreateAddressDTO, req.body);
             const address = await this.customerAddressService.create(req.user?.user_id!, data);
-            res.status(201).json({message: "Address added", address});
+            sendSuccess(res, {message: "Address added", address}, 201);
         } catch (err) {
             next(err);
         }
@@ -33,7 +34,7 @@ export class CustomerAddressController {
             const addressId = Number(req.params.addressId);
             const data = await validateBody(UpdateAddressDTO, req.body);
             const address = await this.customerAddressService.update(req.user?.user_id!, addressId, data);
-            res.status(200).json({message: "Address updated", address});
+            sendSuccess(res, {message: "Address updated", address});
         } catch (err) {
             next(err);
         }
@@ -43,7 +44,7 @@ export class CustomerAddressController {
         try {
             const addressId = Number(req.params.addressId);
             await this.customerAddressService.remove(req.user?.user_id!, addressId);
-            res.status(200).json({message: "Address deleted"});
+            sendSuccess(res, {message: "Address deleted"});
         } catch (err) {
             next(err);
         }

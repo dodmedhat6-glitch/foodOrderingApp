@@ -16,6 +16,10 @@ import { CustomerAddressService } from "../../app/addresses/service/customer-add
 import { CustomerAddressController } from "../../app/addresses/controller/customer-address.controller";
 import { PermissionsCashService } from "../../app/rbac/service/permissions-cash.service";
 import { Logger } from "../logger/logger";
+import {cacheProvider} from "../cache/init";
+import {mailjetProvider} from "../../pkg/email/mailjet";
+import {env} from "../config/env";
+import {emailProvider} from "../email/init";
 
 container.registerSingleton(tokens.AuthService, AuthService);
 container.registerSingleton(tokens.AuthController, AuthController);
@@ -41,5 +45,8 @@ container.registerSingleton(tokens.CustomerAddressController, CustomerAddressCon
 container.registerSingleton(tokens.PermissionCashService, PermissionsCashService);
 container.registerSingleton(tokens.Logger, Logger);
 
-export { container };
 
+container.registerInstance(tokens.CacheProvider, cacheProvider);
+container.registerInstance(tokens.EmailProvider, emailProvider)
+
+export { container };

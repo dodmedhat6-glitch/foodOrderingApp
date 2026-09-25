@@ -6,6 +6,9 @@ import { setAuthCookies } from "../../../lib/auth/guard"
 import { NotAuthenticated } from "../../../lib/auth/error"
 import {inject, injectable} from "tsyringe";
 import {tokens} from "../../../lib/di/tokens";
+import {sendSuccess} from "../../../lib/http/response";
+import {env} from "../../../lib/config/env";
+import {hours} from "../../../pkg/utils/times";
 
 @injectable()
 export class AuthController {
@@ -24,7 +27,7 @@ export class AuthController {
             setAuthCookies(res, result.accessToken, result.refreshToken);
 
             //3.respond
-            res.status(201).json(result);
+           sendSuccess(res, result, 201);
 
         } catch (err) {
             next(err);
@@ -39,7 +42,7 @@ export class AuthController {
 
             setAuthCookies(res, result.accessToken, result.refreshToken);
 
-            res.status(200).json(result)
+            sendSuccess(res, result, 200)
         }
         catch (err) {
             next(err)
@@ -50,7 +53,7 @@ export class AuthController {
         try {
             const data = await validateBody(PasswordForgetDto, req.body);
             await this.authService.forgetPassword(data)
-            res.status(200).json({
+            sendSuccess(res,{
                 "message": "Email sent with otp"
             })
         }
@@ -63,8 +66,8 @@ export class AuthController {
         try {
             const data = await validateBody(ResetPasswordDto, req.body);
             await this.authService.resetPassword(data)
-            res.status(200).json({
-                "message": "password reset successfully, please login again"
+            sendSuccess(res, {
+                message: "password reset successfully, please login again"
             })
         }
         catch (err) {
@@ -72,20 +75,17 @@ export class AuthController {
         }
     }
 
-    reMakeAccessToken = async (req: Request, res: Response, next: NextFunction) => {
+    refresh = async(req: Request, res: Response, next: NextFunction) => {
         try {
-            const token = req.cookies.refresh_token;
-            if (!token) {
-                throw NotAuthenticated
-            }
-
-            const result = await this.authService.refreshToken(token);
-            setAuthCookies(res, result.accessToken, result.refreshToken);
-
-            res.status(200).json(result)
-        }
-        catch (err) {
-            next(err)
+            const result = await this.authService.refresh(req.cookies.refresh_token);
+            res.cookie("access_token", result.accessToken, {
+                httpOnly: true,
+                secure: env.isProduction,
+                maxAge: hours(1),
+            });
+            sendSuccess(res, {message: "success"});
+        } catch(err) {
+            next(err);
         }
     }
 
@@ -93,8 +93,8 @@ export class AuthController {
         try {
             const data = await validateBody(ResetPasswordDto, req.body);
             await this.authService.acceptInvite(data)
-            res.status(200).json({
-                "message": "invitation accepted successfully , please login "
+            sendSuccess(res, {
+                message: "invitation accepted successfully , please login "
             })
         }
         catch (err) {

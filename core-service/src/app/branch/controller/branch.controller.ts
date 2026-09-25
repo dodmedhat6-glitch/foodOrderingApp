@@ -5,6 +5,7 @@ import {CreateBranchDTO, UpdateBranchDTO, UpdateBranchStatusDTO} from "../dto/br
 import {BranchService} from "../service/branch.service";
 import {inject, injectable} from "tsyringe";
 import {tokens} from "../../../lib/di/tokens";
+import {sendSuccess} from "../../../lib/http/response";
 
 function normalizeTime(value: unknown): unknown {
     if (typeof value !== "string") {
@@ -46,7 +47,7 @@ export class BranchController {
         try {
             const data = await validateBody(CreateBranchDTO, normalizeBranchBody(req.body));
             const branch = await this.branchService.create(Number(req.params.restaurantId), req.user?.user_id!, req.user?.role! as SystemRole, data);
-            res.status(201).json({message: "Branch created", branch});
+            sendSuccess(res, {message: "Branch created", branch}, 201);
         } catch (err) {
             next(err);
         }
@@ -55,8 +56,7 @@ export class BranchController {
     findNearby = async (req: Request, res: Response, next: NextFunction) => {
         try {
             const results = await this.branchService.findNearby( Number(req.query.lat), Number(req.query.lng))
-            res.status(200).json({data :results});
-            console.log(results)
+            sendSuccess(res, results);
         } catch (err) {
             next(err);
         }
@@ -65,7 +65,7 @@ export class BranchController {
     findByRestaurant = async (req: Request, res: Response, next: NextFunction) => {
         try {
             const results = await this.branchService.findByRestaurant(Number(req.params.restaurantId));
-            res.status(200).json({data: results});
+            sendSuccess(res, results);
         } catch (err) {
             next(err);
         }
@@ -75,7 +75,7 @@ export class BranchController {
         try {
             const data = await validateBody(UpdateBranchDTO, normalizeBranchBody(req.body));
             const branch = await this.branchService.update(Number(req.params.branchId), req.user?.user_id!, req.user?.role! as SystemRole, data);
-            res.status(200).json({message: "Branch updated", branch});
+            sendSuccess(res, {message: "Branch updated", branch});
         } catch (err) {
             next(err);
         }
@@ -85,7 +85,7 @@ export class BranchController {
         try {
             const data = await validateBody(UpdateBranchStatusDTO, req.body);
             const branch = await this.branchService.updateStatus(Number(req.params.branchId), req.user?.role! as SystemRole, data);
-            res.status(200).json({message: "Branch status updated", branch: {id: branch.id, isActive: branch.isActive, acceptOrders: branch.acceptOrders, commission: branch.commission}});
+            sendSuccess(res, {message: "Branch status updated", branch: {id: branch.id, isActive: branch.isActive, acceptOrders: branch.acceptOrders, commission: branch.commission}});
         } catch (err) {
             next(err);
         }

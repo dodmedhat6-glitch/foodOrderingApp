@@ -5,6 +5,7 @@ import {NotAuthenticated} from "./error";
 import {PermissionsCashService} from "../../app/rbac/service/permissions-cash.service";
 import {container} from "../di/containers";
 import {tokens} from "../di/tokens";
+import {sendError} from "../http/response";
 
 const permissionCashService = container.resolve<PermissionsCashService>(tokens.PermissionCashService);
 
@@ -39,17 +40,13 @@ export function rbac(options: RBACOptions) {
             if (req.user.role == SystemRole.RESTAURANT_USER) {
                 const permissions = await permissionCashService.getPermissions(req.user.restaurantRole!);
                 if (!permissionCashService.hasPermissions(permissions, resource, action)) {
-                    return res.status(403).json({
-                        error: "Permission denied",
-                    })
+                    return sendError(res, "Permission denied", 403)
                 }
                 // pass
                 return next();
             }
             // if not restaurant ser -> throw err
-            return res.status(403).json({
-                error: "Permission denied",
-            })
+            return sendError(res, "Permission denied", 403)
         }
         catch (error) {
             next(error);
@@ -61,12 +58,12 @@ export function requireRestaurantMember(paramName: string= 'restaurantId') {
     return async(req: Request, res: Response, next: NextFunction) => {
         const restaurantId = parseInt(req.params[paramName] as string); // req.params.restaurantId
         if (!restaurantId) {
-            return res.status(500).json({"message": "something went wrong"});
+            return sendError(res, "something went wrong", 500);
         }
 
         if (req.user?.role == SystemRole.SYSTEM_ADMIN) return next();
         if (Number(req.user?.restaurantId) !== Number(restaurantId)) {
-            return res.status(403).json({ error: "Permission denied" });
+            return sendError(res, "Permission denied", 403);
         }
         next();
     }
@@ -76,11 +73,11 @@ export function requireBranchAccess(paramName: string = 'branchId') {
     return async(req: Request, res: Response, next: NextFunction) => {
         const branchId = Number(req.params[paramName]);
         if (!Number.isFinite(branchId) || branchId <= 0) {
-            return res.status(400).json({message: "Invalid branch id"});
+            return sendError(res, "Invalid branch id", 400);
         }
 
         if (!req.user) {
-            return res.status(401).json({error: "Not authenticated"});
+            return sendError(res, "Not authenticated", 401);
         }
 
         if (req.user.role === SystemRole.SYSTEM_ADMIN) {
@@ -88,14 +85,14 @@ export function requireBranchAccess(paramName: string = 'branchId') {
         }
 
         if (req.user.role !== SystemRole.RESTAURANT_USER) {
-            return res.status(403).json({error: "Permission denied"});
+            return sendError(res, "Permission denied", 403);
         }
 
         const allowedBranchIds = Array.isArray(req.user.branchIds) ? req.user.branchIds : [];
         const hasBranchAccess = allowedBranchIds.some((allowedBranchId) => Number(allowedBranchId) === branchId);
 
         if (!hasBranchAccess) {
-            return res.status(403).json({error: "Permission denied"});
+            return sendError(res, "Permission denied", 403);
         }
 
         return next();

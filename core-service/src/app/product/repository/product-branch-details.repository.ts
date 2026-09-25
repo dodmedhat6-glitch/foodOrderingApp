@@ -1,4 +1,4 @@
-import {db} from "../../../lib/knex/knex";
+import {db} from "../../../lib/knex/kenx";
 import {ProductBranchDetails} from "../entity/product-branch-details.entity";
 
 const PBD_COLUMNS = ['id', 'branch_id', 'product_id', 'price', 'stock', 'is_available'];

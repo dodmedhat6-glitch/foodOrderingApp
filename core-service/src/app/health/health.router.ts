@@ -1,13 +1,14 @@
 import {Router} from "express";
 import {testDB} from "../../lib/knex/kenx.js";
+import {sendError, sendSuccess} from "../../lib/http/response";
 
 export const healthRouter = Router();     
 
 healthRouter.get("/", async (req, res) => {
     try {
         await testDB();
-        res.status(200).json({ status: "ok" });
+        sendSuccess(res, {status: "ok"});
     } catch (error) {
-        res.status(500).json({message: "Database connection failed" });
+        sendError(res, "Database connection failed", 500);
     }
 });

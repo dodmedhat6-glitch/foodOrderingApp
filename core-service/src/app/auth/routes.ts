@@ -2,13 +2,14 @@ import { Router } from 'express'
 import {container} from "../../lib/di/containers";
 import {tokens} from "../../lib/di/tokens";
 import {AuthController} from './controller/auth.controller';
+import {idempotency} from "../../lib/Idempotency/Idempotency";
 
 export const authRouter = Router();
 const authController = container.resolve<AuthController>(tokens.AuthController);
 
 authRouter.post('/register', authController.register);
 authRouter.post('/login', authController.login);
-authRouter.post('/refresh', authController.reMakeAccessToken);
-authRouter.post('/forget-password', authController.forgetPassword)
-authRouter.post('/reset-password', authController.resetPassword)
-authRouter.post('/accept-invite', authController.acceptInvite)
+authRouter.post('/forget-password', idempotency({strict: true}), authController.forgetPassword);
+authRouter.post('/reset-password', authController.resetPassword);
+authRouter.post('/refresh', authController.refresh);
+authRouter.post('/accept-invite', authController.acceptInvite);

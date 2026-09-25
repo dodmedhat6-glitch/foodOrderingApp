@@ -104,5 +104,5 @@ export async function findNearbyBranches(lat: number, lng: number): Promise<Bran
        AND ST_DWithin(b.location, ST_MakePoint(?, ?)::geography, b.delivery_radius*1000)
     `,[lng, lat]);
 
-    return result.rows;
+    return result.rows.map(toEntity);
 }

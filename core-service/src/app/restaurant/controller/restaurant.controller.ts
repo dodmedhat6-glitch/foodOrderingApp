@@ -5,6 +5,8 @@ import {UpdateRestaurantDTO, UpdateRestaurantStatusDTO} from "../dto/restaurant.
 import {SystemRole} from "../../user/enums";
 import {inject, injectable} from "tsyringe";
 import {tokens} from "../../../lib/di/tokens";
+import {sendSuccess} from "../../../lib/http/response";
+import {parseFilters, parseQuery} from "../../../lib/http/pagination/parse.query";
 
 @injectable()
 export class RestaurantController{
@@ -13,8 +15,11 @@ export class RestaurantController{
 
     getAll = async (req: Request , res: Response , next : NextFunction)=>{
         try {
-            const result = await  this.restaurantService.findAll()
-            res.status(200).json({data: result})
+            const params = parseQuery(req.query);
+            const filters = parseFilters(req.query, ['id', 'name', 'status']);
+
+            const result = await  this.restaurantService.findAll(params , filters);
+            sendSuccess(res, result)
         } catch (err) {
             next(err)
         }

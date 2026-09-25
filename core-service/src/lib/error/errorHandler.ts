@@ -1,6 +1,7 @@
 import type {Request, Response, NextFunction} from "express";
 import {logger} from "../logger/logger.js";
 import type {AppError} from "./AppError.js";
+import {sendError} from "../http/response.js";
 
 export function errorHandler(err: AppError, req: Request, res: Response, _next: NextFunction) {
     const operational = err.isOperational;
@@ -14,11 +15,7 @@ export function errorHandler(err: AppError, req: Request, res: Response, _next: 
     })
 
     if(operational){
-        return res.status(err.statusCode).json({
-            error: err.message,
-        })
+        return sendError(res, err.message, err.statusCode)
     }
-    return res.status(500).json({
-        error: 'Something went wrong',
-    })
+    return sendError(res, "Something went wrong", 500)
 }

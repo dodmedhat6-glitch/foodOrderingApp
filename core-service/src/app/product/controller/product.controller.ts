@@ -5,6 +5,7 @@ import {CreateProductDTO, UpdateProductDTO} from "../dto/product.dto";
 import {ProductService} from "../service/product.service";
 import {inject, injectable} from "tsyringe";
 import {tokens} from "../../../lib/di/tokens";
+import {sendSuccess} from "../../../lib/http/response";
 
 @injectable()
 export class ProductController {
@@ -19,7 +20,7 @@ export class ProductController {
                 req.user?.role! as SystemRole,
                 data,
             );
-            res.status(201).json({message: "Product created", product});
+            sendSuccess(res, {message: "Product created", product}, 201);
         } catch (err) {
             next(err);
         }
@@ -32,7 +33,7 @@ export class ProductController {
                 req.user?.user_id!,
                 req.user?.role! as SystemRole,
             );
-            res.status(200).json({data: results});
+            sendSuccess(res, results);
         } catch (err) {
             next(err);
         }
@@ -41,7 +42,7 @@ export class ProductController {
     findCategories = async (req: Request, res: Response, next: NextFunction) => {
         try {
             const results = await this.productService.findCategories(Number(req.params.restaurantId));
-            res.status(200).json({data: results});
+            sendSuccess(res, results);
         } catch (err) {
             next(err);
         }
@@ -50,7 +51,7 @@ export class ProductController {
     findByBranch = async (req: Request, res: Response, next: NextFunction) => {
         try {
             const results = await this.productService.findByBranch(Number(req.params.branchId));
-            res.status(200).json({data: results});
+            sendSuccess(res, results);
         } catch (err) {
             next(err);
         }
@@ -59,7 +60,7 @@ export class ProductController {
     findById = async (req: Request, res: Response, next: NextFunction) => {
         try {
             const product = await this.productService.findById(Number(req.params.id));
-            res.status(200).json(product);
+            sendSuccess(res, product);
         } catch (err) {
             next(err);
         }
@@ -76,7 +77,7 @@ export class ProductController {
                 data,
                 branchId,
             );
-            res.status(200).json({message: "Product updated", ...result});
+            sendSuccess(res, {message: "Product updated", ...result});
         } catch (err) {
             next(err);
         }

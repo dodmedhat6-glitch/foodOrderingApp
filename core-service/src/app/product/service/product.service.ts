@@ -1,4 +1,4 @@
-import {UnAuthorisedError} from "../../../lib/auth/errors";
+import {UnAuthorisedError} from "../../../lib/auth/error";
 import {RestaurantNotFoundError} from "../../restaurant/errors";
 import {findRestaurantById} from "../../restaurant/repository/restaurant.repo";
 import {ProductNotFoundError} from "../errors";

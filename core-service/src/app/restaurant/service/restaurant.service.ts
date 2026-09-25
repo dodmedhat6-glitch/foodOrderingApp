@@ -13,6 +13,7 @@ import {UpdateRestaurantDTO, UpdateRestaurantStatusDTO} from "../dto/restaurant.
 import {RestaurantNotFoundError} from "../errors";
 import {UnAuthorisedError} from "../../../lib/auth/error";
 import {injectable} from "tsyringe";
+import {buildPaginationResult, FilterParams, PaginationParams} from "../../../lib/http/pagination/cursor.pagination";
 
 
 @injectable()
@@ -35,9 +36,9 @@ export class RestaurantService{
         return restaurant;
     }
 
-    findAll = async () =>{
-        const result = await findAllRestaurants();
-        return result
+    findAll = async (params : PaginationParams , filters : FilterParams[]) =>{
+        const result = await findAllRestaurants(params , filters);
+        return buildPaginationResult(result, params.limit, params.sortBy)
     }
 
     update = async(id: number, userId: number, userRole: SystemRole, data: UpdateRestaurantDTO) => {

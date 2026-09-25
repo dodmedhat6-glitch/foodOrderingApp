@@ -25,9 +25,26 @@ import {MemberBranchEntity} from "../entity/member-branch.entity";
 import {AppError} from "../../../lib/error/AppError";
 import {getPermissionsDetailsByRoleName} from "../repository/permission.repo";
 import {injectable} from "tsyringe";
+import {RestaurantMemberEntity} from "../entity/restaurant-member.entity";
+import {Knex} from "knex";
 
 @injectable()
 export  class MemberService{
+
+    async createOwnerMember(restaurantId: number, userId: number, trx: Knex.Transaction): Promise<RestaurantMemberEntity> {
+        const ownerRoleId = await findRoleByName('owner', trx);
+        if (!ownerRoleId) throw RoleNotFoundError;
+        const now = new Date();
+        return createRestaurantMember({
+            restaurantId,
+            userId,
+            roleId: ownerRoleId,
+            status: RestaurantMemberStatus.ACTIVE,
+            createdAt: now,
+            updatedAt: now,
+        }, trx);
+    }
+
     async createMember(restaurantId:number , data: CreateMemberDto) {
             // don't accept owner role creation
             if(data.role === 'owner'){

@@ -21,4 +21,10 @@ export const tokens = {
 
     //Lib/infra/
     Logger: Symbol.for("Logger"),
+
+    // cache
+    CacheProvider: Symbol.for("CacheProvider"),
+
+    //email
+    EmailProvider: Symbol.for("EmailProvider")
 }

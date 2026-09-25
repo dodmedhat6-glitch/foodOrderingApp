@@ -1,141 +1,124 @@
-import {LoginDto, PasswordForgetDto, RegisterDto, ResetPasswordDto} from '../dto/auth.dto.js';
+import {injectable, inject} from "tsyringe";
+import {tokens} from "../../../lib/di/tokens";
+import {IEmailProvider} from "../../../pkg/email/email.interface";
+import {db} from "../../../lib/knex/kenx";
 
-import {
-    findUserByEmail,
-    insertUser,
-    IsUserExistsByEmailOrPhone,
-    updateUserPassword
-} from '../../user/repository/user.repo.js';
+import {activateMemberByUserId, findRestaurantMemberWithRole} from "../../rbac/repository/restaurant_member.repo";
+import {MemberService} from "../../rbac/service/member.service";
+import {RestaurantService} from "../../restaurant/service/restaurant.service";
+import {SystemRole} from "../../user/enums";
+import {UserService} from "../../user/service/user.service";
 
+
+import {passwordResetEmail} from "../templates/password-reset";
 import {
     CannotSignupAsAdmin,
     IncorrectCredentials,
     InvalidOTP,
-    RestaurantDataRequiredError,
-    UserAlreadyExistsError
-} from '../error.js'
-
-import {
-    comparePassword,
-    creatAccessToken,
-    creatRefreshToken,
-    generateOTP,
-    hashOTP,
-    HashPassword,
-    verifyRefreshToken
-} from '../utils.js'
+    RestaurantDataRequiredError
+} from "../error";
 import {
     createResetPassword,
     findLatestPasswordResetByUserId,
     updatePasswordResetConsumedAt
-} from '../repo/reset_password.repo.js'
-import {SystemRole} from '../../user/enums.js'
-import {NotAuthenticated} from '../../../lib/auth/error.js';
-import {RestaurantService} from "../../restaurant/service/restaurant.service";
-import {db} from "../../../lib/knex/kenx";
-import {minutes} from "../../../pkg/utils/times";
-import {activateMemberByUserId, findRestaurantMemberWithRole} from "../../rbac/repository/restaurant_member.repo";
+} from "../repo/reset_password.repo";
+import {
+    HashPassword,
+    creatAccessToken,
+    creatRefreshToken,
+    comparePassword,
+    generateOTP,
+    hashOTP,
+    verifyRefreshToken, JwtPayload
+} from "../utils";
+import {LoginDto, PasswordForgetDto, RegisterDto, ResetPasswordDto} from "../dto/auth.dto";
+import {findUserByEmail, updateUserPassword} from "../../user/repository/user.repo";
 import {findBranchesByMemberId} from "../../rbac/repository/member_branch.repo";
-import {inject, injectable} from "tsyringe";
-import {tokens} from "../../../lib/di/tokens";
-import {UserService} from "../../user/service/user.service";
-import {MemberService} from "../../rbac/service/member.service";
+
 
 @injectable()
 export class AuthService {
     constructor(
-        @inject(tokens.RestaurantService) private readonly restaurantService : RestaurantService,
+        @inject(tokens.RestaurantService) private readonly restaurantService: RestaurantService,
         @inject(tokens.UserService) private readonly userService: UserService,
-        @inject(tokens.MemberService) private readonly memberBranchService: MemberService
-    ){}
+        @inject(tokens.MemberService) private readonly memberService: MemberService,
+        @inject(tokens.EmailProvider) private readonly emailProvider: IEmailProvider,
+    ) {}
 
-    register = async (data: RegisterDto) => {
+    register = async(data: RegisterDto )=> {
         if (data.role == SystemRole.SYSTEM_ADMIN) {
             throw CannotSignupAsAdmin
         }
-        //1.check if user already exists
-        const existing = await IsUserExistsByEmailOrPhone(data.email, data.phone);
 
-        //2.if exists, throw error
-        if (existing) {
-            throw UserAlreadyExistsError
-        }
-
-        //3.if not exists, hash the password
-        const hashedPassword = await HashPassword(data.password)
-
-        //4.create a new user in the database
-
-        const now = new Date()
         const trx = await db.transaction();
         let user
         let restaurant
+        let restaurantMemberInfo: {restaurantId?: number, restaurantRole?: string, branchIds?: number[]} = {};
         try {
-             user = await insertUser({
+            user = await this.userService.create({
                 email: data.email,
                 phone: data.phone,
                 name: data.name,
-                passwordHash: hashedPassword,
+                password: data.password,
                 systemRole: data.role,
-                createdAt: now,
-                updatedAt: now
             }, trx)
-            //check if the type of user is restaurant , then call restaurant service to create a new restaurant
 
-            if (data.role == SystemRole.RESTAURANT_USER){
-                if(data.restaurant == undefined){
-                    throw RestaurantDataRequiredError
+            // check if the type of user is restaurant, then call restaurant service to create a new restaurant
+            if (data.role == SystemRole.RESTAURANT_USER) {
+                if (data.restaurant == undefined) {
+                    throw RestaurantDataRequiredError;
                 }
-               restaurant= await this.restaurantService.create(user.id,data.restaurant,trx)
-                }
+                restaurant = await this.restaurantService.create(user.id, data.restaurant, trx)
+                // insert the owner member via member service
+                await this.memberService.createOwnerMember(restaurant.id, user.id, trx);
+                restaurantMemberInfo = {
+                    restaurantId: restaurant.id,
+                    restaurantRole: 'owner',
+                    branchIds: [],
+                };
+            }
+
             await trx.commit();
+        } catch (error) {
+            await trx.rollback();
+            throw error;
         }
 
-        catch(error){
-            await trx.rollback()
-            throw error
-        }
-
-        //5.create a JWT token for the user, access and refresh token
-        const payload = { user_id: user.id, role: data.role, email: user.email };
+        // create access token , refresh token
+        const payload : JwtPayload = {user_id: user.id, role: data.role, email: user.email, ...restaurantMemberInfo};
         const accessToken = creatAccessToken(payload);
         const refreshToken = creatRefreshToken(payload);
 
-        //6.return the token and user data
         return {
-            message: "user registered successful",
+            message: "successfully registered user",
             accessToken,
             refreshToken,
             user: {
                 id: user.id,
                 email: user.email,
                 phone: user.phone,
-                SystemRole: user.systemRole
+                systemRole: user.systemRole,
+                createdAt: user.createdAt,
             },
             restaurant
         }
     }
 
-
-    login = async (data: LoginDto) => {
-        // find user by email input
-        const user = await findUserByEmail(data.email)
-        if (!user) {
+    login = async(data: LoginDto )=> {
+        const user = await findUserByEmail(data.email);
+        if(!user) {
             throw IncorrectCredentials
         }
-        // compare password
-        const matchPassword = await comparePassword(data.password, user.passwordHash)
-        // if password does not match throw err
-        if (!matchPassword) {
+        const match = await comparePassword(data.password,user.passwordHash)
+        if(!match) {
             throw IncorrectCredentials
         }
 
-        // in case the user is restaurant user
-        let restaurantMemberInfo = null;
-        if (user.systemRole == SystemRole.RESTAURANT_USER){
-            const memberData = await findRestaurantMemberWithRole(user.id);
-            if(memberData){
-                const branchIds = await  findBranchesByMemberId(memberData.member.id);
+        let restaurantMemberInfo = null
+        if(user.systemRole == SystemRole.RESTAURANT_USER) {
+            const memberData =  await findRestaurantMemberWithRole(user.id);
+            const branchIds = await findBranchesByMemberId(memberData.member.id);
+            if(memberData)  {
                 restaurantMemberInfo = {
                     restaurantId: memberData.member.restaurantId,
                     restaurantRole: memberData.roleName,
@@ -143,100 +126,74 @@ export class AuthService {
                 }
             }
         }
-        // generate token
-        const payload = { user_id: user.id, role: user.systemRole, email: user.email  , ...restaurantMemberInfo };
+        const payload : JwtPayload = {user_id: user.id, role: user.systemRole, email: user.email, ...restaurantMemberInfo};
         const accessToken = creatAccessToken(payload);
         const refreshToken = creatRefreshToken(payload);
-
         return {
-            message: "user login successful",
+            message: "Login successful",
             accessToken,
             refreshToken,
             user: {
                 id: user.id,
                 email: user.email,
                 phone: user.phone,
-                SystemRole: user.systemRole
+                systemRole: user.systemRole,
+                createdAt: user.createdAt,
             }
         }
     }
 
-
-    forgetPassword = async (data: PasswordForgetDto) => {
-        //check if exists
+    forgetPassword = async(data: PasswordForgetDto )=> {
         const user = await findUserByEmail(data.email);
-        if (!user) {
+        if(!user) {
             return
         }
-        //generate an otp
-        const otp = generateOTP()
-
-        //hash otp 
-        const hashedOTP = hashOTP(otp)
-
-        // insert the otp 
+        const otp =  generateOTP();
+        const hashedOtp = hashOTP(otp);
         await createResetPassword({
-            userId: user.id,
-            otpHash: hashedOTP,
-            expiresAt: new Date(Date.now() + minutes(10)),//10 min
-            createdAt: new Date()
-        })
-        // TODO : SEND EMAIL
-        console.log(otp);
+                userId: user.id,
+                otpHash: hashedOtp,
+                expiresAt: new Date(Date.now() + (10*60*1000)),
+                createdAt: new Date(),
+            }
+        )
+        const email = passwordResetEmail(otp);
+        await this.emailProvider.sendEmail(data.email, email.subject, email.html);
     }
 
-    resetPassword = async (data: ResetPasswordDto) => {
-        //find user
+    resetPassword =  async(data: ResetPasswordDto ) => {
         const user = await findUserByEmail(data.email);
         if (!user) {
             throw InvalidOTP
         }
-        //find resetPassword
         const reset = await findLatestPasswordResetByUserId(user.id);
-        if (!reset) {
+        if(!reset) {
             throw InvalidOTP
         }
-        //check otp
-        const inputOTPHash = hashOTP(data.otp);
-        if (inputOTPHash !== reset.otpHash || reset.isExpired()) {
+        const inputOTPHash = hashOTP(data.otp)
+
+        if(inputOTPHash != reset.otpHash || reset.isExpired() ) {
             throw InvalidOTP
         }
-
-        // update user Password
-        const newHashedPassword = await HashPassword(data.newPassword);
-        await updateUserPassword(user.id, newHashedPassword)
-
-        // update reset password
+        const hashedPassword = await HashPassword(data.newPassword);
+        await updateUserPassword(user.id, hashedPassword);
         await updatePasswordResetConsumedAt(reset.id)
 
-        return user.id
-
-
+        return user;
     }
 
-    refreshToken = async (token: string) => {
-        try {
-            const payload = verifyRefreshToken(token);
-            const accessToken = creatAccessToken(payload);
-            const refreshToken = creatRefreshToken(payload);
-
-            return {
-                message: "token refreshed successfully",
-                accessToken,
-                refreshToken
-            }
-        } catch {
-            throw NotAuthenticated
+    refresh = async(refreshToken: string) => {
+        if (!refreshToken) {
+            throw IncorrectCredentials;
         }
+        const payload = verifyRefreshToken(refreshToken);
+        const accessToken = creatAccessToken({user_id: payload.user_id, role: payload.role, email: payload.email});
+        return {accessToken};
     }
 
-    acceptInvite = async (data: ResetPasswordDto) =>{
-
-        // in this function we can use the same service we used in reset password service
+    acceptInvite = async(data: ResetPasswordDto )=> {
         const user = await this.resetPassword(data)
-
-        // the last thing we need to active user
-        await activateMemberByUserId(user)
+        // activate member
+        await activateMemberByUserId(user.id)
     }
-
 }

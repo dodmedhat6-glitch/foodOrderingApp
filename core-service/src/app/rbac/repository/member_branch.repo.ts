@@ -27,12 +27,9 @@ export async function setMemberBranch(memberId :number , rows: MemberBranchEntit
 
 
 export async function findBranchesByMemberId(memberId: number): Promise<number[]> {
-    const row = await db("member_branches")
-        .select("branch_id")
-        .where("member_id", memberId);
-    return row.map(row => row.branch_id);
+    const rows = await db("member_branches").select("branch_id").where("member_id", memberId);
+    return rows?.map(row => row.branch_id); // [{branch_id:2}, {branch_id:3}] -> [2,3]
 }
-
 
 export async function countBranchesByIdsAndRestaurant(branchIds:number[], restaurantId:number): Promise<number>{
 

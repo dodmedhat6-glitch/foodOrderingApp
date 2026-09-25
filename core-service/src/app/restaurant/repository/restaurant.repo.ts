@@ -1,6 +1,12 @@
 import {RestaurantEntity} from "../entity/restaurant.entity";
 import {db} from "../../../lib/knex/kenx";
 import {Knex} from "knex";
+import {
+    applyCursorPagination,
+    applyFilters,
+    FilterParams,
+    PaginationParams
+} from "../../../lib/http/pagination/cursor.pagination";
 
 const RESTAURANT_COLUMNS = [
     'id' ,
@@ -13,6 +19,18 @@ const RESTAURANT_COLUMNS = [
     'updated_at',
     'status_updated_at'
 ];
+
+const RESTAURANT_SORT_COLUMNS: Record<string, string> = {
+    id: 'id',
+    ownerId: 'owner_id',
+    name: 'name',
+    logoURL: 'logo_url',
+    status: 'status',
+    primaryCountry: 'primary_country',
+    createdAt: 'create_at',
+    updateAt: 'updated_at',
+    statusUpdatedAt: 'status_updated_at'
+};
 
 
 function toEntity(row:any){
@@ -30,8 +48,13 @@ function toEntity(row:any){
 }
 
 
-export async function findAllRestaurants(): Promise<RestaurantEntity[]>{
-    const row = await db('restaurants').select(RESTAURANT_COLUMNS)
+export async function findAllRestaurants(params : PaginationParams , filters : FilterParams[]): Promise<RestaurantEntity[]>{
+    const sortBy = RESTAURANT_SORT_COLUMNS[params.sortBy] ?? 'id';
+    const paginationParams = {...params, sortBy};
+    let query = db('restaurants').select(RESTAURANT_COLUMNS)
+    query = applyFilters(query, filters)
+    query = applyCursorPagination(query, paginationParams)
+    const row = await query;
     return row.map(toEntity)
 }
 
@@ -77,7 +100,6 @@ export async function updateRestaurantStatus(id: number, status: string): Promis
     }).returning(RESTAURANT_COLUMNS);
     return toEntity(row);
 }
-
 
 
 

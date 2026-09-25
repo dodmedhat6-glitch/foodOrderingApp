@@ -1,5 +1,5 @@
 import {Knex} from "knex";
-import {db} from "../../../lib/knex/knex";
+import {db} from "../../../lib/knex/kenx";
 import {ProductCategory} from "../entity/product-category.entity";
 
 const CATEGORY_COLUMNS = ['id', 'restaurant_id', 'name', 'created_at', 'updated_at'];
