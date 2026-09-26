@@ -1,0 +1,7 @@
+node_modules/
+dist/
+.env
+*.log
+play/
+.idea/
+.claude/settings.local.json
