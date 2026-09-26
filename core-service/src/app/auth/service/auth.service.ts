@@ -187,7 +187,14 @@ export class AuthService {
             throw IncorrectCredentials;
         }
         const payload = verifyRefreshToken(refreshToken);
-        const accessToken = creatAccessToken({user_id: payload.user_id, role: payload.role, email: payload.email});
+        const accessToken = creatAccessToken({
+            user_id: payload.user_id,
+            role: payload.role,
+            email: payload.email,
+            restaurantId: payload.restaurantId,
+            restaurantRole: payload.restaurantRole,
+            branchIds: payload.branchIds
+        });
         return {accessToken};
     }
 

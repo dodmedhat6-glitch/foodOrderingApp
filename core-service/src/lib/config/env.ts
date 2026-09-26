@@ -25,7 +25,7 @@ const schema = z.object({
     MAILJET_API_KEY: z.string(),
     MAILJET_SECRET_KEY: z.string(),
     MAILJET_FROM_EMAIL: z.string(),
-    MAILJET_FROM_NAME: z.string()
+    MAILJET_FROM_NAME: z.string(),
 })
 
 const parsed = schema.parse(process.env)
