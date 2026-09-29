@@ -7,7 +7,7 @@ import { container } from './lib/di/containers';
 import { tokens } from './lib/di/tokens';
 import { closeAllPools } from './lib/db/regions';
 import { cacheProvider } from './lib/cache/init';
-import { pubSubProvider } from './lib/pubsub/init';
+import { eventConsumer } from './lib/message-broker/init';
 import { startInvalidationSubscriber } from './lib/cache/invalidation-subscriber';
 import { initWsGateway } from './lib/ws/init';
 
@@ -17,9 +17,12 @@ const server = http.createServer(app);
 const wsGateway = initWsGateway(server);
 container.registerInstance(tokens.WsGateway, wsGateway);
 
-startInvalidationSubscriber(pubSubProvider, cacheProvider).catch((err: unknown) => {
-  logger.error('failed to start cache invalidation subscriber', { error: String(err) });
-});
+eventConsumer
+  .connect()
+  .then(() => startInvalidationSubscriber(eventConsumer, cacheProvider))
+  .catch((err: unknown) => {
+    logger.error('failed to start cache invalidation subscriber', { error: String(err) });
+  });
 
 server.listen(env.port, () => {
   logger.info(`order-service listening on port ${env.port}`, { regions: env.regionCodes });
@@ -30,7 +33,7 @@ async function shutdown() {
   server.close(async () => {
     logger.info('http server closed');
     await closeAllPools();
-    await pubSubProvider.quit();
+    await eventConsumer.close();
     await cacheProvider.quit();
     await wsGateway.close();
     logger.info('shutdown complete');

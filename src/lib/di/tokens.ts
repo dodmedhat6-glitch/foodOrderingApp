@@ -2,9 +2,8 @@ export const tokens = {
   // infra
   Logger: Symbol.for('Logger'),
 
-  // cache / pubsub
+  // cache (Redis is caching only - events go over RabbitMQ)
   CacheProvider: Symbol.for('CacheProvider'),
-  PubSubProvider: Symbol.for('PubSubProvider'),
 
   // cross-service
   CoreClient: Symbol.for('CoreClient'),

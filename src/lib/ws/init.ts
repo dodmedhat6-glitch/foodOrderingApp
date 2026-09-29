@@ -1,11 +1,20 @@
 import type { Server as HttpServer } from 'http';
 import { WsGateway } from '../../pkg/ws-gateway/ws-gateway';
 import { verifyAccessToken, JwtPayload } from '../auth/jwt';
-import { pubSubProvider } from '../pubsub/init';
-import { logger } from '../logger/logger';
 
+/**
+ * Wires the shared WebSocket adapter to this service's HTTP server.
+ *
+ * Cross-instance fan-out is NOT wired up: the Redis Pub/Sub bridge that used
+ * to forward `orders:status:*` into the gateway was removed when Redis was
+ * narrowed to caching only. Nothing published on that channel yet, so no
+ * behaviour was lost - but with more than one instance running, a
+ * `gateway.publish(...)` only reaches clients connected to that same
+ * instance. Re-introduce fan-out over RabbitMQ (one exclusive queue per
+ * instance, not the shared round-robin queue) before scaling out.
+ */
 export function initWsGateway(httpServer: HttpServer): WsGateway<JwtPayload> {
-  const gateway = new WsGateway<JwtPayload>({
+  return new WsGateway<JwtPayload>({
     server: httpServer,
     verifyToken: (token) => {
       try {
@@ -15,20 +24,4 @@ export function initWsGateway(httpServer: HttpServer): WsGateway<JwtPayload> {
       }
     },
   });
-
-  pubSubProvider
-    .psubscribe('orders:status:*', (channel, message) => {
-      const orderId = channel.split(':')[2];
-      if (!orderId) return;
-      try {
-        gateway.publish(`order:${orderId}`, JSON.parse(message));
-      } catch {
-        logger.warn('ws-gateway: dropped non-JSON message', { channel });
-      }
-    })
-    .catch((err: unknown) => {
-      logger.error('ws-gateway: failed to subscribe to orders:status:*', { error: String(err) });
-    });
-
-  return gateway;
 }

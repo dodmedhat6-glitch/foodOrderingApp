@@ -180,16 +180,26 @@ response object.
   - `docs/01-system-design.md` §3.1, `docs/04-modules/orders.md` and
     `docs/06-implementation-roadmap.md` still describe the superseded interface-plus-stub
     approach; this section wins where they disagree.
+- **Redis is for caching only. Every event goes over RabbitMQ.** Redis Pub/Sub was removed
+  outright — there is no `pkg/pubsub`, no `lib/pubsub`, and no `PubSubProvider` token. Anything
+  that needs to publish or consume an event uses `pkg/message-broker` (`IEventConsumer`) wired in
+  `lib/message-broker/init.ts`. Do not reach for `redis.publish`/`psubscribe`; the only Redis
+  clients in the tree are `pkg/cache/redis.ts` and `lib/cache/init.ts`.
 - **Critical cached core-service data is invalidated on write, not just TTL'd.** Product
-  stock/price/`isAvailable` (and branch/restaurant operational status) get a Redis Pub/Sub
-  invalidation event (`core:invalidate:{entityType}`) from core-service on write; this service
-  subscribes and **deletes** the matching `cache:core:*` key. TTL remains a safety net underneath
-  this, not the primary mechanism, for these specific fields. See `docs/01-system-design.md` §5.1 —
-  this needs a small publish-side addition in core-service that does not exist yet as of this
-  writing (`core-service/src/app/product/service/product.service.ts`).
+  stock/price/`isAvailable` (and branch/restaurant operational status) get an invalidation event
+  from core-service on write, published to the `core.events` topic exchange with routing key
+  `core.<entityType>.invalidated`; this service consumes it and **deletes** the matching
+  `cache:core:*` key. TTL remains a safety net underneath this, not the primary mechanism, for
+  these specific fields. Because RabbitMQ redelivers unacked messages, the consumer dedupes on
+  `eventId` before acting. See `docs/01-system-design.md` §5.1.
 - **WebSocket base is a shared `pkg/` adapter, not a shared running process.** `pkg/ws-gateway` is
   built to be copy-pasted into any service (core-service included) that needs to push real-time
-  events to connected clients; each service runs its own instance against its own Redis channels.
+  events to connected clients; each service runs its own instance.
+  - **Cross-instance fan-out is currently unimplemented.** The Redis Pub/Sub bridge that forwarded
+    `orders:status:*` into the gateway went away with Redis Pub/Sub. Nothing published on that
+    channel yet, so nothing broke — but `gateway.publish(...)` now only reaches clients on the
+    same instance. Before running more than one instance, re-add fan-out over RabbitMQ using one
+    **exclusive queue per instance**, not the shared round-robin queue in `env.rabbit.queue`.
   See `docs/01-system-design.md` §5.2.
 
 ## 10. Idempotency

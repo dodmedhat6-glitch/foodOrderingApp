@@ -1,61 +1,85 @@
 import { describe, expect, it, vi } from 'vitest';
 import { startInvalidationSubscriber } from './invalidation-subscriber';
-import type { IPubSubProvider, PubSubHandler } from '../../pkg/pubsub/pubsub.interface';
+import type { ConsumedEvent, EventHandler, IEventConsumer } from '../../pkg/message-broker/message-broker.interface';
 import type { ICacheProvider } from '../../pkg/cache/cache.interface';
 
-function fakePubSub() {
-  let handler: PubSubHandler | undefined;
+function fakeConsumer() {
+  let handler: EventHandler | undefined;
   return {
     provider: {
-      publish: vi.fn(),
-      psubscribe: vi.fn(async (_pattern: string, h: PubSubHandler) => {
+      connect: vi.fn(),
+      consume: vi.fn(async (h: EventHandler) => {
         handler = h;
       }),
-      quit: vi.fn(),
-    } satisfies IPubSubProvider,
-    emit(channel: string, message: string) {
-      handler?.(channel, message);
+      close: vi.fn(),
+    } satisfies IEventConsumer,
+    emit(event: ConsumedEvent) {
+      return handler?.(event);
     },
   };
 }
 
 function fakeCache() {
+  const store = new Map<string, string>();
   return {
-    get: vi.fn(),
-    set: vi.fn(),
+    get: vi.fn(async (key: string) => store.get(key) ?? null),
+    set: vi.fn(async (key: string, value: string) => {
+      store.set(key, value);
+    }),
     del: vi.fn().mockResolvedValue(undefined),
   } satisfies ICacheProvider;
 }
 
+function event(overrides: Partial<ConsumedEvent> = {}): ConsumedEvent {
+  return {
+    eventId: 'event-1',
+    eventType: 'core.product.invalidated',
+    entityType: 'product',
+    entityId: 42,
+    occurredAt: new Date().toISOString(),
+    payload: { id: 42, occurredAt: new Date().toISOString() },
+    ...overrides,
+  };
+}
+
 describe('startInvalidationSubscriber', () => {
   it('deletes the matching cache:core:<entityType>:<id> key on a valid event', async () => {
-    const { provider, emit } = fakePubSub();
+    const { provider, emit } = fakeConsumer();
     const cache = fakeCache();
 
     await startInvalidationSubscriber(provider, cache);
-    emit('core:invalidate:product', JSON.stringify({ id: 42, occurredAt: Date.now() }));
-    await Promise.resolve();
+    await emit(event());
 
     expect(cache.del).toHaveBeenCalledWith('cache:core:product:42');
   });
 
-  it('subscribes on the core:invalidate:* pattern', async () => {
-    const { provider } = fakePubSub();
+  it('registers a handler with the consumer', async () => {
+    const { provider } = fakeConsumer();
     const cache = fakeCache();
 
     await startInvalidationSubscriber(provider, cache);
 
-    expect(provider.psubscribe).toHaveBeenCalledWith('core:invalidate:*', expect.any(Function));
+    expect(provider.consume).toHaveBeenCalledWith(expect.any(Function));
   });
 
-  it('ignores malformed payloads without throwing', async () => {
-    const { provider, emit } = fakePubSub();
+  it('skips a redelivered event whose eventId was already handled', async () => {
+    const { provider, emit } = fakeConsumer();
     const cache = fakeCache();
 
     await startInvalidationSubscriber(provider, cache);
-    emit('core:invalidate:product', 'not json');
-    await Promise.resolve();
+    await emit(event());
+    await emit(event());
 
-    expect(cache.del).not.toHaveBeenCalled();
+    expect(cache.del).toHaveBeenCalledTimes(1);
+  });
+
+  it('rethrows (so the message is nacked) when cache.del fails', async () => {
+    const { provider, emit } = fakeConsumer();
+    const cache = fakeCache();
+    cache.del.mockRejectedValueOnce(new Error('redis down'));
+
+    await startInvalidationSubscriber(provider, cache);
+
+    await expect(emit(event())).rejects.toThrow('redis down');
   });
 });

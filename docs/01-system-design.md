@@ -127,9 +127,9 @@ Redis is used here for:
    plain key for last-seen timestamp. This is the *live* view; `agent_presence` in Postgres (if
    kept at all) is a periodically-flushed durability snapshot, not the hot path.
 4. **Rate limiting** (optional, shared middleware from core-service conventions if present).
-5. **Real-time status fan-out** — order-status-changed and delivery-status-changed events are
-   published on Redis Pub/Sub channels that this service's own WebSocket gateway instance
-   subscribes to (see §5.2). This repo owns both publishing and, now, its own gateway process.
+5. ~~**Real-time status fan-out**~~ — **removed.** This was Redis Pub/Sub; Redis is now caching
+   only and all events go over RabbitMQ. Cross-instance WebSocket fan-out is currently
+   unimplemented — see §5.2.
 6. **Critical-data invalidation** — a subscriber that deletes stale `cache:core:*` entries the
    moment core-service writes the underlying row, rather than waiting out the TTL (see §5.1).
 
@@ -146,10 +146,12 @@ fine for data where staleness causes a real problem:
 - **Branch/restaurant operational status** (open/closed, suspended) — an order placed against a
   branch core-service has just closed is a fulfillment failure, not just a UX glitch.
 
-Mechanism: core-service publishes an invalidation event on a Redis Pub/Sub channel
-(`core:invalidate:{entityType}`, e.g. `core:invalidate:product`) whenever it writes one of these
-fields, payload `{ id, occurredAt }`. This service runs a small always-on subscriber (`lib/cache/
-invalidation-subscriber.ts`) that, on receipt, **deletes** (never refreshes) the corresponding
+Mechanism: core-service publishes an invalidation event to the `core.events` **RabbitMQ topic
+exchange** with routing key `core.<entityType>.invalidated` (e.g. `core.product.invalidated`)
+whenever it writes one of these fields. This service binds its own durable queue
+(`env.rabbit.queue`, bound with `env.rabbit.bindingKey`) and runs a small always-on consumer
+(`lib/cache/invalidation-subscriber.ts`) that, on receipt, **deletes** (never refreshes) the
+corresponding
 `cache:core:{entityType}:{id}` key. Delete-not-refresh is deliberate: the subscriber doesn't need
 to know core-service's full response shape, only that "this key is no longer trustworthy" — the
 next reader repopulates it synchronously from core-service, correctly, on demand. The existing
@@ -177,8 +179,14 @@ hops to (extra infra, extra network hop, a new shared-ownership question), this 
   subscription topics (e.g. `order:{orderId}`, `agent:{agentId}`), and exposes `publish(topic,
   payload)`. Zero order-service domain knowledge — copy-pasteable into core-service unchanged, per
   the `pkg/` purity rule.
-- `lib/ws/init.ts` — this service's own thin wiring: subscribes to this service's Redis Pub/Sub
-  channels (`orders:status:{orderId}`, agent-location) and calls `publish()` on the matching topic.
+- `lib/ws/init.ts` — this service's own thin wiring: attaches the gateway to the HTTP server and
+  supplies JWT verification. **It no longer bridges any message bus into the gateway.** It used to
+  subscribe to Redis Pub/Sub channels (`orders:status:{orderId}`, agent-location) and re-`publish()`
+  them; that went away when Redis was narrowed to caching only. Nothing published on those channels
+  yet, so no behaviour was lost, but **cross-instance fan-out is now unimplemented**: a
+  `gateway.publish(...)` reaches only clients connected to that same instance. Re-introduce it over
+  RabbitMQ before scaling past one instance, binding **one exclusive queue per instance** — the
+  shared `env.rabbit.queue` would round-robin events between instances instead of fanning out.
 - This resolves the item previously flagged as deferred in `06-implementation-roadmap.md` §4 (a
   future WebSocket/SSE gateway) — it's in scope now, but scoped as **a reusable base, not a shared
   running process**: order-service runs its own instance against its own channels; core-service

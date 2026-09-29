@@ -363,13 +363,21 @@ it is trivially unit-testable and reusable from any module. See `05-folder-struc
 | `agents:geo:{region}` (Redis geo set) | live agent lat/lng for nearest-agent queries (`GEOSEARCH`) | member refreshed each `ping`, expired via a companion TTL key if agent goes silent |
 | `agents:lastseen:{agentId}` | last ping timestamp | short TTL, refreshed each ping |
 | `cache:core:restaurant:{id}` / `cache:core:branch:{id}` / `cache:core:address:{id}` / `cache:core:product:{id}` | read-through cache of core-service lookups (product entry includes price/stock/isAvailable) | short TTL (seconds-minutes), never authoritative — plus event-driven deletion, see below |
-| `orders:status:{orderId}` (pub/sub channel) | real-time status fan-out, consumed by this service's own `pkg/ws-gateway` instance (`01-system-design.md` §5.2) | n/a (pub/sub, not stored) |
-| `core:invalidate:{entityType}` (pub/sub channel, published by core-service) | critical-data invalidation — this service subscribes and deletes `cache:core:{entityType}:{id}` on receipt (`01-system-design.md` §5.1) | n/a (pub/sub, not stored) |
+| `dedupe:event:{eventId}` | marks a consumed RabbitMQ event as already handled, so a redelivery is not applied twice (`lib/cache/invalidation-subscriber.ts`) | 10 minutes |
 
-All keys are prefixed `orders:` or `agents:`/`cache:core:` to coexist safely in the Redis instance
-shared with core-service (see `01-system-design.md` §5 and `AGENTS.md`). `core:invalidate:*` is
-namespaced under `core:` (not `orders:`/`agents:`) because core-service is the publisher — the
-namespace identifies the writer, matching the convention's intent.
+**Redis is used for caching and ephemeral state only — never as a message bus.** The two
+Pub/Sub channels this table used to list (`orders:status:{orderId}` for WebSocket fan-out and
+`core:invalidate:{entityType}` for cache invalidation) are gone: Redis Pub/Sub was removed
+entirely and all eventing moved to RabbitMQ.
+
+- Cache invalidation now arrives on the `core.events` topic exchange with routing key
+  `core.<entityType>.invalidated` (`01-system-design.md` §5.1). Because RabbitMQ redelivers
+  unacked messages, the consumer dedupes on `eventId` via the `dedupe:event:*` key above.
+- Real-time status fan-out across instances is **currently unimplemented** — see
+  `01-system-design.md` §5.2.
+
+All keys are prefixed `orders:` or `agents:`/`cache:core:`/`dedupe:` to coexist safely in the
+Redis instance shared with core-service (see `01-system-design.md` §5 and `AGENTS.md`).
 
 ## 7. Open design questions to validate with the team
 
