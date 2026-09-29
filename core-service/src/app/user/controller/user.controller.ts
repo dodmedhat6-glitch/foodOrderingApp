@@ -14,7 +14,7 @@ export class UserController {
                 return sendError(res, "Unauthorized", 401)
             }
 
-            const user = await this.userService.findByUserId(req.user.user_id)
+            const user = await this.userService.getByUserId(req.user.user_id)
             sendSuccess(res, user)
 
         }
@@ -30,7 +30,7 @@ export class UserController {
                 return sendError(res, "Unauthorized", 401)
             }
 
-            await this.userService.updateUserFields(req.user.user_id , req.body)
+            await this.userService.updateProfile(req.user.user_id , req.body)
             sendSuccess(res, {message: "User updated successfully"})
 
         }
