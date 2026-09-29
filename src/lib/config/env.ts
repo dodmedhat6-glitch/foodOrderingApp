@@ -50,6 +50,14 @@ const schema = z.object({
   REDIS_HOST: z.string().default('localhost'),
   REDIS_PORT: z.string().default('6379'),
   REDIS_PASSWORD: z.string().optional(),
+  RABBIT_URL: z.string().default('amqp://localhost:5672'),
+  RABBIT_EXCHANGE: z.string().default('core.events'),
+  RABBIT_QUEUE: z.string().default('order-service.cache-invalidation'),
+  RABBIT_BINDING_KEY: z.string().default('core.*.invalidated'),
+  // Origin only, no path: CoreClient resolves request paths against it with
+  // `new URL(path, baseUrl)`, and those paths already carry the "/api" prefix.
+  CORE_SERVICE_BASE_URL: z.string().default('http://localhost:3000'),
+  CORE_SERVICE_API_KEY: z.string(),
   ...regionEnvShape,
 });
 
@@ -104,6 +112,16 @@ export const env = {
     host: parsed.REDIS_HOST!,
     port: Number(parsed.REDIS_PORT),
     password: parsed.REDIS_PASSWORD,
+  },
+  rabbit: {
+    url: parsed.RABBIT_URL!,
+    exchange: parsed.RABBIT_EXCHANGE!,
+    queue: parsed.RABBIT_QUEUE!,
+    bindingKey: parsed.RABBIT_BINDING_KEY!,
+  },
+  coreService: {
+    baseUrl: parsed.CORE_SERVICE_BASE_URL!,
+    apiKey: required('CORE_SERVICE_API_KEY'),
   },
   isProduction: process.env.NODE_ENV === 'production',
 };

@@ -1,9 +1,9 @@
 # Module: Orders (`app/orders`) — Business Logic & Implementation Plan
 
 Owns writes to: `orders`, `order_items`. Read-only dependency on: core-service (restaurant,
-branch, product, address, user) via `ICoreServiceClient` (stub for now, `01-system-design.md`
-§3.1), cached in Redis and invalidated on write for the critical fields — stock/price/isAvailable
-— per `01-system-design.md` §5.1. This is the **first module to build** — everything else
+branch, product, address, user) via the `coreClient` transport in `lib/core-client`
+(`01-system-design.md` §3.1), cached in Redis and invalidated on write for the critical fields —
+stock/price/isAvailable — per `01-system-design.md` §5.1. This is the **first module to build** — everything else
 (payments, delivery, restaurant finance) references an `orders` row.
 
 ## 1. Order status state machine
@@ -66,9 +66,19 @@ update — not over HTTP, since both modules share one process and one regional 
 3. Resolve `customerAddressId → { lat, lng, addressText }` from core-service, and verify it
    belongs to the requesting customer (403 otherwise).
 4. For each line item, resolve `productId → { name, imageUrl, unitPriceMinor, isAvailable, stock }`
-   via `ICoreServiceClient.getProducts(productIds[], branchId)` (a product not sold at this branch
-   is a `404`, not a `422` — it's not a valid item for this order at all). **Batch this lookup as
-   one call** — never N sequential calls per item, per the "no N+1" rule in `AGENTS.md`. This read
+   from core-service (a product not sold at this branch is a `404`, not a `422` — it's not a valid
+   item for this order at all). **Batch this lookup as one call** — never N sequential calls per
+   item, per the "no N+1" rule in `AGENTS.md`:
+
+   ```ts
+   const { data: products } = await coreClient.request<{ success: boolean; data: ProductLookup[] }>({
+     method: 'GET',
+     path: `/api/internal/products?ids=${productIds.join(',')}&branchId=${branchId}`,
+     correlationId: req.correlationId,
+   });
+   ```
+
+   Define `ProductLookup` in this module — the client is generic and carries no domain types. This read
    goes through the `cache:core:product:{id}` read-through cache; because stock/`isAvailable` are
    invalidation-covered (`01-system-design.md` §5.1), a cache hit here is trustworthy up to the
    invalidation event's delivery, not just the TTL.

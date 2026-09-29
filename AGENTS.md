@@ -160,10 +160,26 @@ response object.
 
 ## 9. Cross-service integration & real-time — decided pieces
 
-- **Core-service client is interface-first.** `pkg/core-client` (`ICoreServiceClient`) is what
-  every module codes against; the `lib/` wiring currently registers a **stub/mock implementation**,
-  not a real HTTP client — real endpoint integration against core-service is deferred until its
-  contracts stabilize. See `docs/01-system-design.md` §3.1.
+- **Core-service client is a thin `lib/` transport, not an interface-first `pkg/` adapter.**
+  `lib/core-client` (`core-client.ts`, `errors.ts`, `types.ts`) is the single way to reach
+  core-service. `CoreClient.request<T>({ method, path, body?, correlationId?, idempotencyKey? })`
+  is generic: it owns the URL, the `x-api-key` header, retries and error mapping, and knows
+  nothing about branches, products or orders — callers name the path and the response type.
+  Import the `coreClient` singleton it exports, or resolve `tokens.CoreClient` from DI.
+  - It lives in `lib/`, not `pkg/`, precisely because it depends on `env` and `AppError`, which
+    §2 forbids `pkg/` from importing. Only `pkg/utils/retry` is pulled in from `pkg/`.
+  - There is **no `ICoreServiceClient` and no stub implementation** — an earlier draft had both
+    and they were removed. Do not reintroduce a domain-typed interface or fixture client
+    without agreeing it first; test by stubbing `fetch`.
+  - `CORE_SERVICE_BASE_URL` is an **origin only**, with no `/api` suffix: request paths carry
+    the full prefix themselves, e.g. `"/api/internal/branches/123"`.
+  - 5xx becomes a 503 `AppError` and is retried (3 attempts, 50ms → 500ms backoff); every other
+    non-2xx becomes an `AppError` carrying the upstream status and is **not** retried.
+  - Known gap: there is no request timeout, so a hung core-service holds the calling request
+    open across all attempts. Accepted for now — raise it before adding one.
+  - `docs/01-system-design.md` §3.1, `docs/04-modules/orders.md` and
+    `docs/06-implementation-roadmap.md` still describe the superseded interface-plus-stub
+    approach; this section wins where they disagree.
 - **Critical cached core-service data is invalidated on write, not just TTL'd.** Product
   stock/price/`isAvailable` (and branch/restaurant operational status) get a Redis Pub/Sub
   invalidation event (`core:invalidate:{entityType}`) from core-service on write; this service

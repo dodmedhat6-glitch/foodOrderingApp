@@ -7,7 +7,7 @@ export const tokens = {
   PubSubProvider: Symbol.for('PubSubProvider'),
 
   // cross-service
-  CoreServiceClient: Symbol.for('CoreServiceClient'),
+  CoreClient: Symbol.for('CoreClient'),
 
   // real-time
   WsGateway: Symbol.for('WsGateway'),

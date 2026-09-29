@@ -33,9 +33,12 @@ one. It formalizes core-service's own informal `src/workflow` checklist
       `lib/auth/guard.ts` (`authenticate` middleware).
 - [ ] `pkg/cache/` + `lib/cache/init.ts` — Redis wiring, namespaced keys per
       `02-database-design.md` §6.
-- [ ] `pkg/core-client/` (`ICoreServiceClient` + a stub implementation) + `lib/core-client/init.ts`
-      — registers the stub in DI now; real HTTP implementation swaps in later with no call-site
-      changes. See `01-system-design.md` §3.1.
+- [ ] `pkg/utils/retry.ts` — exponential backoff with full jitter, injectable clock/jitter so
+      tests cost no wall-clock time. Used by `lib/core-client`.
+- [ ] `lib/core-client/` (`core-client.ts`, `errors.ts`, `types.ts`) — one generic
+      `CoreClient.request<T>()` against core-service's live `/api/internal/*` endpoints,
+      registered in DI as `tokens.CoreClient`. No interface, no stub. See
+      `01-system-design.md` §3.1.
 - [ ] `lib/cache/invalidation-subscriber.ts` — subscribes to `core:invalidate:{entityType}` and
       deletes the matching `cache:core:{entityType}:{id}` key. See `01-system-design.md` §5.1.
 - [ ] `pkg/ws-gateway/` + `lib/ws/init.ts` — the shared WebSocket base adapter and this service's
@@ -105,9 +108,10 @@ this order means every cross-module call is wired against real code the moment i
   built out, the `rbac({resource, action})` middleware factory and its DI-injected
   `IPermissionChecker` interface should exist from the first protected route, per
   `05-folder-structure.md` §2.1.
-- **`ICoreServiceClient` (stub)** — the `orders` module is the first real caller (branch, address,
-  product price/stock lookups on order creation); build the interface and stub together with it,
-  per `01-system-design.md` §3.1, not deferred to whichever module happens to need a second method.
+- **`lib/core-client`** — built as part of one-time project setup (§0). The `orders` module is its
+  first real caller (branch, address, product price/stock lookups on order creation); it defines
+  its own payload types and unwraps core-service's `{ success, data }` envelope at the call site,
+  since the client is generic and carries no domain types. See `01-system-design.md` §3.1.
 - **Cache-invalidation subscriber** — `orders`' product-stock read is the first place a stale cache
   read is a real correctness bug, so the subscriber (`01-system-design.md` §5.1) lands with it.
 

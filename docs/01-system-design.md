@@ -63,25 +63,40 @@ The whiteboard names five constraints that shape every decision below:
     so we default to the query builder and only drop to raw SQL for specific hot paths we
     identify by measurement (e.g. the restaurant order board query, active-delivery lookups).
 
-### 3.1 Core-service client — interface in place now, real HTTP deferred
+### 3.1 Core-service client — one generic transport in `lib/`
 
 The synchronous reads in the bullet above (branch, address, agent/user identity, and — see §5.1 —
-product price/stock) are built against an **interface**, not a concrete HTTP call, from day one:
+product price/stock) all go through a single, deliberately thin client:
 
-- `ICoreServiceClient` (methods: `getBranch`, `getAddress`, `getUser`, `getProduct`, etc., one per
-  lookup this service actually needs — no speculative methods) lives in `pkg/core-client` per the
-  `pkg`/`lib`/`app` boundary (`05-folder-structure.md` §2): zero knowledge of order-service, just a
-  typed adapter around "call this other HTTP service."
-- **For now**, the `lib/` wiring registers a **stub implementation** (fixture/deterministic data,
-  or a `NotImplementedError` for lookups no module needs yet) instead of a real HTTP client — the
-  same pattern already used for Kashier in `06-implementation-roadmap.md` §4 (build against a fake
-  provider client when the real one isn't available yet). Every module that needs a core-service
-  lookup (order creation validating stock/branch/address, payments reading payout bank details) is
-  built and tested now against `ICoreServiceClient`, with **zero call-site changes** required later
-  when a real `pkg/core-client/http.ts` implementation swaps in — only the `lib/` wiring changes.
-- This is a deliberate sequencing choice, not a scope cut: core-service's own endpoint contracts
-  for these lookups aren't finalized yet, and blocking this service's build on that would be
-  backwards. The interface is the contract; the transport is swappable.
+- `lib/core-client` holds three files — `core-client.ts` (the `CoreClient` class plus a
+  `coreClient` singleton), `errors.ts`, `types.ts`. Its whole surface is one generic method:
+
+  ```ts
+  coreClient.request<T>({ method, path, body?, correlationId?, idempotencyKey? }): Promise<T>
+  ```
+
+  It owns the URL, the `x-api-key` header, retries and error mapping, and nothing else. Callers
+  name the path and the response type; there are **no per-lookup methods** such as `getBranch` or
+  `getProducts`, and no domain types in the client.
+- It lives in `lib/`, not `pkg/`, because it reads `env` and throws `AppError` — both of which the
+  `pkg`/`lib`/`app` boundary (`05-folder-structure.md` §2) forbids `pkg/` from touching. The only
+  thing it borrows from `pkg/` is `pkg/utils/retry`.
+- **There is no `ICoreServiceClient` interface and no stub implementation.** An earlier revision of
+  this document specified both, and an interface-plus-fixture-stub pair was built and then removed:
+  with core-service's `/api/internal/*` endpoints now live, the indirection bought nothing that
+  stubbing `fetch` in a test does not. Do not reintroduce a domain-typed interface or a fixture
+  client without agreeing it first (`AGENTS.md` §9).
+- Behaviour worth knowing at the call site:
+  - `CORE_SERVICE_BASE_URL` is an **origin only**, with no `/api` suffix — paths carry the full
+    prefix, e.g. `"/api/internal/branches/123"`.
+  - 5xx becomes a 503 `AppError` and is retried (3 attempts, 50ms → 500ms backoff). Every other
+    non-2xx becomes an `AppError` carrying the upstream status and is **not** retried.
+  - `204` resolves to `undefined`.
+  - core-service wraps every response in its `{ success, data }` envelope, and `request<T>` returns
+    the parsed body **verbatim** — it does not unwrap. Type `T` as the envelope and read `.data`,
+    and define the payload type in the calling module: the client carries no domain types.
+  - There is **no request timeout** yet: a hung core-service holds the calling request open across
+    all three attempts. Known, accepted gap — raise it before adding one.
 
 ## 4. Consistency model
 
