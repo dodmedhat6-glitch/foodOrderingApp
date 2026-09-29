@@ -5,7 +5,7 @@ import {
     RoleNotFound,
     RoleNotFoundError
 } from "../errors";
-import {findUserByEmail, insertUser} from "../../user/repository/user.repo";
+import {findUserByEmail, createUser} from "../../user/repository/user.repo";
 import {UserAlreadyExistsError} from "../../auth/error";
 import {findRoleByName} from "../repository/role.repo";
 import {db} from "../../../lib/knex/kenx";
@@ -64,7 +64,7 @@ export  class MemberService{
             const trx = await db.transaction()
             const now = new Date()
             try{
-                const user = await insertUser({
+                const user = await createUser({
                     email : data.email,
                     phone: data.phoneNumber,
                     name : data.name,
