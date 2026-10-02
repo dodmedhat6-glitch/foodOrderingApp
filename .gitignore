@@ -1,7 +1,11 @@
 node_modules/
 dist/
 .env
+.env.*.bak
 *.log
-play/
+.DS_Store
 .idea/
-.claude/settings.local.json
+.vscode/
+
+# local experimentation scripts — not tracked
+play/

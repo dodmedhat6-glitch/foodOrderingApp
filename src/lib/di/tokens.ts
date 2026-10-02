@@ -1,16 +1,13 @@
-export const tokens = {
-  // infra
-  Logger: Symbol.for('Logger'),
+export const TOKENS = {
+    // infra
+    Logger: Symbol.for("Logger"),
+    CacheProvider: Symbol.for("CacheProvider"),
+    MessageBroker: Symbol.for("MessageBroker"),
+    CoreClient: Symbol.for("CoreClient"),
+    WsServer: Symbol.for("WsServer"),
 
-  // cache (Redis is caching only - events go over RabbitMQ)
-  CacheProvider: Symbol.for('CacheProvider'),
-
-  // cross-service
-  CoreClient: Symbol.for('CoreClient'),
-
-  // real-time
-  WsGateway: Symbol.for('WsGateway'),
-
-  // auth
-  PermissionChecker: Symbol.for('PermissionChecker'),
+    // orders
+    OrderService: Symbol.for("OrderService"),
+    OrderStatusService: Symbol.for("OrderStatusService"),
+    OrderController: Symbol.for("OrderController"),
 };

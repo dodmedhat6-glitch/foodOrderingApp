@@ -1,21 +1,29 @@
-import type { Request, Response, NextFunction } from 'express';
-import { logger } from '../logger/logger';
-import type { AppError } from './AppError';
-import { sendError } from '../http/response';
+import type {Request, Response, NextFunction} from "express";
+import {logger} from "../logger/logger";
+import {AppError} from "./AppError";
 
-export function errorHandler(err: AppError, req: Request, res: Response, _next: NextFunction) {
-  const operational = err.isOperational;
+export function errorHandler(
+    err: Error,
+    req: Request,
+    res: Response,
+    _next: NextFunction,
+) {
+    const appErr = err instanceof AppError ? err : new AppError(err.message ?? "Unknown error", 500, false);
+    const operational = appErr.isOperational;
 
-  logger.error(err.message, {
-    statusCode: err.statusCode,
-    stack: err.stack,
-    operational: operational,
-    body: req.body,
-    correlationId: req.correlationId,
-  });
+    logger.error(appErr.message, {
+        statusCode: appErr.statusCode,
+        stack: appErr.stack,
+        operational,
+        path: req.originalUrl,
+        method: req.method,
+        correlationId: req.correlationId,
+    });
 
-  if (operational) {
-    return sendError(res, err.message, err.statusCode);
-  }
-  return sendError(res, 'Something went wrong', 500);
+    if (operational) {
+        // `details` carries contract-mandated context (offending stock lines,
+        // the rejected status edge) that the client acts on — see AppError.
+        return res.status(appErr.statusCode).json({error: appErr.message, ...appErr.details});
+    }
+    return res.status(500).json({error: "Something went wrong"});
 }

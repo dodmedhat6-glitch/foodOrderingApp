@@ -1,127 +1,167 @@
-import { config } from 'dotenv';
-import path from 'path';
-import { z } from 'zod';
+import path from "path";
+import {config} from "dotenv";
+import {z} from "zod";
 
-config({ path: path.resolve(__dirname, '../../../.env') });
+// C:\Users\ABDULLAH\Desktop\quickbite\order-service\.env
+config({path: path.resolve(__dirname, "../../../.env")});
 
-export interface ConnConfig {
-  host: string;
-  port: number;
-  user: string;
-  password: string;
-  database: string;
-}
+const baseSchema = z.object({
+    PORT: z.string().default("4000"),
+    NODE_ENV: z.string().default("development"),
 
-export interface RegionConfig {
-  id: number;
-  hot: ConnConfig;
-  archive: ConnConfig;
-}
+    ACCESS_SECRET: z.string(),
+    REFRESH_SECRET: z.string(),
+    ACCESS_EXPIRES_IN: z.string().default("3600"),
+    REFRESH_EXPIRES_IN: z.string().default("604800"),
 
-const regionCodes = (process.env.REGIONS ?? '')
-  .split(',')
-  .map((code) => code.trim())
-  .filter(Boolean);
+    CORS_ORIGINS: z.string().default("http://localhost:3000"),
 
-if (regionCodes.length === 0) {
-  throw new Error('REGIONS env var must list at least one region/country code, e.g. "EG,SA"');
-}
+    REGIONS: z.string().min(1),
 
-const regionEnvShape: Record<string, z.ZodTypeAny> = {};
-for (const code of regionCodes) {
-  regionEnvShape[`DB_${code}_HOST`] = z.string().default('localhost');
-  regionEnvShape[`DB_${code}_PORT`] = z.string().default('5432');
-  regionEnvShape[`DB_${code}_USER`] = z.string().default('postgres');
-  regionEnvShape[`DB_${code}_PASSWORD`] = z.string();
-  regionEnvShape[`DB_${code}_NAME`] = z.string();
-  regionEnvShape[`DB_${code}_ARCHIVE_NAME`] = z.string();
-}
+    DB_POOL_MAX: z.string().default("10"),
+    DB_MIGRATION_DIRECTORY: z.string().default("src/migrations"),
+    DB_MIGRATION_EXTENSION: z.string().default("ts"),
 
-const schema = z.object({
-  PORT: z.string().default('3000'),
-  DB_POOL_MAX: z.string().default('10'),
-  DB_MIGRATIONS_DIRECTORY: z.string().default('src/migrations'),
-  DB_MIGRATIONS_EXTENSION: z.string().default('ts'),
-  ACCESS_SECRET: z.string(),
-  REFRESH_SECRET: z.string(),
-  ACCESS_EXPIRATION: z.string().default('15m'),
-  REFRESH_EXPIRATION: z.string().default('7d'),
-  CORS_ORIGIN: z.string().default('http://localhost:3001'),
-  REDIS_HOST: z.string().default('localhost'),
-  REDIS_PORT: z.string().default('6379'),
-  REDIS_PASSWORD: z.string().optional(),
-  RABBIT_URL: z.string().default('amqp://localhost:5672'),
-  RABBIT_EXCHANGE: z.string().default('core.events'),
-  RABBIT_QUEUE: z.string().default('order-service.cache-invalidation'),
-  RABBIT_BINDING_KEY: z.string().default('core.*.invalidated'),
-  // Origin only, no path: CoreClient resolves request paths against it with
-  // `new URL(path, baseUrl)`, and those paths already carry the "/api" prefix.
-  CORE_SERVICE_BASE_URL: z.string().default('http://localhost:3000'),
-  CORE_SERVICE_API_KEY: z.string(),
-  ...regionEnvShape,
+    REDIS_HOST: z.string().default("localhost"),
+    REDIS_PORT: z.string().default("6379"),
+    REDIS_PASSWORD: z.string().default(""),
+
+    RABBITMQ_URL: z.string(),
+    RABBITMQ_CORE_EVENTS_EXCHANGE: z.string().default("core.events"),
+    RABBITMQ_CORE_EVENTS_QUEUE: z.string().default("order-service.core-events"),
+    // Core's routing key *is* its event type, and every one it publishes is
+    // `core.<entity>.invalidated` (its lib/events/events.ts). A `product.#`
+    // style binding would match nothing at all.
+    RABBITMQ_CORE_EVENTS_BINDINGS: z.string().default("core.#"),
+    RABBITMQ_CORE_EVENTS_DLX: z.string().default("core.events.dlx"),
+    RABBITMQ_CORE_EVENTS_DLQ: z.string().default("order-service.core-events.dlq"),
+    RABBITMQ_PREFETCH: z.string().default("32"),
+
+    CORE_SERVICE_BASE_URL: z.string(),
+    CORE_INTERNAL_API_KEY: z.string(),
+
+    WS_HEARTBEAT_SEC: z.string().default("30"),
+
+    // ---- orders ----
+    // Platform service fee, in basis points of the subtotal. 0 today; the knob
+    // exists so turning it on is a config change, not a schema change.
+    PLATFORM_SERVICE_FEE_BPS: z.string().default("0"),
+    // How long after an order is placed a customer may still cancel it
+    // (docs/business-logic/orders.md s9).
+    CUSTOMER_CANCELLATION_WINDOW_SEC: z.string().default("60"),
+    // TTL for the cached restaurant order list. Short: the dashboard is
+    // polled hard, but a stale pending-orders page costs the kitchen time.
+    RESTAURANT_ORDERS_CACHE_TTL_SEC: z.string().default("10"),
 });
 
-const parsed = schema.parse(process.env) as Record<string, string | undefined>;
+const parsed = baseSchema.parse(process.env);
 
-function required(key: string): string {
-  const value = parsed[key];
-  if (value === undefined) {
-    throw new Error(`Missing required env var: ${key}`);
-  }
-  return value;
+function parseRegions(raw: string): string[] {
+    return raw
+        .split(",")
+        .map((s) => s.trim())
+        .filter((s) => s.length > 0);
 }
 
-const regions: Record<string, RegionConfig> = {};
-regionCodes.forEach((code, index) => {
-  regions[code] = {
-    id: index,
-    hot: {
-      host: required(`DB_${code}_HOST`),
-      port: Number(required(`DB_${code}_PORT`)),
-      user: required(`DB_${code}_USER`),
-      password: required(`DB_${code}_PASSWORD`),
-      database: required(`DB_${code}_NAME`),
-    },
-    archive: {
-      host: required(`DB_${code}_HOST`),
-      port: Number(required(`DB_${code}_PORT`)),
-      user: required(`DB_${code}_USER`),
-      password: required(`DB_${code}_PASSWORD`),
-      database: required(`DB_${code}_ARCHIVE_NAME`),
-    },
-  };
-});
+export interface ShardConfig {
+    host: string;
+    port: number;
+    username: string;
+    password: string;
+    name: string;
+}
+
+function readShardConfig(region: string, prefix: "DB" | "ARCHIVE_DB"): ShardConfig {
+    // eg, DB
+    const hostKey = `${prefix}_${region}_HOST`;
+    const portKey = `${prefix}_${region}_PORT`;
+    const userKey = `${prefix}_${region}_USERNAME`;
+    const passKey = `${prefix}_${region}_PASSWORD`;
+    const nameKey = `${prefix}_${region}_NAME`;
+
+    const host = process.env[hostKey];
+    const port = process.env[portKey];
+    const username = process.env[userKey];
+    const password = process.env[passKey];
+    const name = process.env[nameKey];
+
+    if (!host || !port || !username || name === undefined) {
+        throw new Error(
+            `Missing ${prefix} env for region "${region}". Expected: ${hostKey}, ${portKey}, ${userKey}, ${passKey}, ${nameKey}`,
+        );
+    }
+
+    return {
+        host,
+        port: Number(port),
+        username,
+        password: password ?? "",
+        name,
+    };
+}
+
+const regions = parseRegions(parsed.REGIONS);
+const hotShards: Record<string, ShardConfig> = {};
+const archiveShards: Record<string, ShardConfig> = {};
+for (const region of regions) {
+    hotShards[region] = readShardConfig(region, "DB");
+    archiveShards[region] = readShardConfig(region, "ARCHIVE_DB");
+}
 
 export const env = {
-  port: Number(parsed.PORT),
-  regionCodes,
-  regions,
-  dbPoolMax: Number(parsed.DB_POOL_MAX),
-  migrationsDirectory: path.resolve(__dirname, '../../../', parsed.DB_MIGRATIONS_DIRECTORY!),
-  migrationsExtension: parsed.DB_MIGRATIONS_EXTENSION!,
-  jwt: {
-    accessSecret: required('ACCESS_SECRET'),
-    refreshSecret: required('REFRESH_SECRET'),
-    accessExpires: parsed.ACCESS_EXPIRATION!,
-    refreshExpires: parsed.REFRESH_EXPIRATION!,
-  },
-  cors: {
-    origin: parsed.CORS_ORIGIN!.split(','),
-  },
-  redis: {
-    host: parsed.REDIS_HOST!,
-    port: Number(parsed.REDIS_PORT),
-    password: parsed.REDIS_PASSWORD,
-  },
-  rabbit: {
-    url: parsed.RABBIT_URL!,
-    exchange: parsed.RABBIT_EXCHANGE!,
-    queue: parsed.RABBIT_QUEUE!,
-    bindingKey: parsed.RABBIT_BINDING_KEY!,
-  },
-  coreService: {
-    baseUrl: parsed.CORE_SERVICE_BASE_URL!,
-    apiKey: required('CORE_SERVICE_API_KEY'),
-  },
-  isProduction: process.env.NODE_ENV === 'production',
+    port: Number(parsed.PORT),
+    isProduction: parsed.NODE_ENV === "production",
+    cors: {origins: parsed.CORS_ORIGINS.split(",").map((s) => s.trim())},
+
+    jwt: {
+        accessSecret: parsed.ACCESS_SECRET,
+        refreshSecret: parsed.REFRESH_SECRET,
+        accessExpiresIn: parsed.ACCESS_EXPIRES_IN,
+        refreshExpiresIn: parsed.REFRESH_EXPIRES_IN,
+    },
+
+    db: {
+        poolMax: Number(parsed.DB_POOL_MAX),
+        migrationDirectory: path.resolve(
+            __dirname,
+            "../../../",
+            parsed.DB_MIGRATION_DIRECTORY,
+        ),
+        migrationExtension: parsed.DB_MIGRATION_EXTENSION,
+    },
+
+    regions,
+    hotShards,
+    archiveShards,
+
+    redis: {
+        host: parsed.REDIS_HOST,
+        port: Number(parsed.REDIS_PORT),
+        password: parsed.REDIS_PASSWORD || undefined,
+    },
+
+    rabbit: {
+        url: parsed.RABBITMQ_URL,
+        exchange: parsed.RABBITMQ_CORE_EVENTS_EXCHANGE,
+        queue: parsed.RABBITMQ_CORE_EVENTS_QUEUE,
+        bindings: parsed.RABBITMQ_CORE_EVENTS_BINDINGS.split(",").map((s) => s.trim()),
+        dlx: parsed.RABBITMQ_CORE_EVENTS_DLX,
+        dlq: parsed.RABBITMQ_CORE_EVENTS_DLQ,
+        prefetch: Number(parsed.RABBITMQ_PREFETCH),
+    },
+
+    core: {
+        baseUrl: parsed.CORE_SERVICE_BASE_URL,
+        internalApiKey: parsed.CORE_INTERNAL_API_KEY,
+    },
+
+    ws: {
+        heartbeatSec: Number(parsed.WS_HEARTBEAT_SEC),
+    },
+
+    orders: {
+        serviceFeeBps: Number(parsed.PLATFORM_SERVICE_FEE_BPS),
+        customerCancellationWindowSec: Number(parsed.CUSTOMER_CANCELLATION_WINDOW_SEC),
+        restaurantListCacheTtlSec: Number(parsed.RESTAURANT_ORDERS_CACHE_TTL_SEC),
+    },
 };
