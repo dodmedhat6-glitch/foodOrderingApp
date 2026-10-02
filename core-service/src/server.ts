@@ -3,6 +3,7 @@ import http from "http";
 import {createApp} from "./app.js";
 import {env} from "./lib/config/env.js";
 import {db} from "./lib/knex/kenx.js";
+import {messageBroker} from "./lib/message-broker/init.js";
 
 
 const app = createApp();
@@ -17,6 +18,7 @@ async function shutdown() {
     console.log("Shutting down server...");
     server.close(async () => {
         console.log("Server closed.");
+        await messageBroker.close();
         await db.destroy();
         console.log("Database connection closed.");
         process.exit(0);

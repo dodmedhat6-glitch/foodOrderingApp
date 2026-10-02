@@ -8,6 +8,7 @@ export const tokens = {
     ProductService: Symbol.for("ProductService"),
     CustomerAddressService: Symbol.for("CustomerAddressService"),
     PermissionCashService: Symbol.for("PermissionCashService"),
+    InternalService: Symbol.for("InternalService"),
 
     // controllers
     AuthController: Symbol.for("AuthController"),
@@ -18,12 +19,16 @@ export const tokens = {
     ProductController: Symbol.for("ProductController"),
     CustomerAddressController: Symbol.for("CustomerAddressController"),
     PermissionCashController: Symbol.for("PermissionCashController"),
+    InternalController: Symbol.for("InternalController"),
 
     //Lib/infra/
     Logger: Symbol.for("Logger"),
 
     // cache
     CacheProvider: Symbol.for("CacheProvider"),
+
+    // cross-service messaging (order-service link)
+    MessageBroker: Symbol.for("MessageBroker"),
 
     //email
     EmailProvider: Symbol.for("EmailProvider")

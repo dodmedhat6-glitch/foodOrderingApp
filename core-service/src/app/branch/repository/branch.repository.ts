@@ -4,17 +4,24 @@ import {Branch} from "../entity/branch.entity";
 
 const BRANCH_COLUMNS = ['id','restaurant_id','country_code','address_text','label','lat','lng',
     'is_active','opens_at','closes_at','accept_orders','created_at','updated_at',
-    'delivery_radius','currency','commission','location'];
+    'delivery_radius','currency','commission','delivery_fee_minor','location'];
 
+/**
+ * node-postgres hands back `bigint` columns as strings (it won't silently
+ * narrow a 64-bit value into a JS number), but every id and money field below
+ * is declared `number` on the entity - and order-service's checkout adds
+ * delivery_fee_minor to a subtotal, where a string would concatenate instead
+ * of summing. Coerce at this boundary so nothing downstream has to know.
+ */
 function toEntity(row: any) {
     return new Branch({
-        id: row.id,
-        restaurantId: row.restaurant_id,
+        id: Number(row.id),
+        restaurantId: Number(row.restaurant_id),
         countryCode: row.country_code,
         addressText: row.address_text,
         label: row.label,
-        lat: row.lat,
-        lng: row.lng,
+        lat: Number(row.lat),
+        lng: Number(row.lng),
         isActive: row.is_active,
         opensAt: row.opens_at,
         closesAt: row.closes_at,
@@ -23,7 +30,8 @@ function toEntity(row: any) {
         updatedAt: row.updated_at,
         deliveryRadius: row.delivery_radius,
         currency: row.currency,
-        commission: row.commission,
+        commission: Number(row.commission),
+        deliveryFeeMinor: Number(row.delivery_fee_minor),
         location: row.location
     });
 }
@@ -44,7 +52,8 @@ export async function createBranch (data: Partial <Branch>, conn: Knex = db): Pr
         updated_at: data.updatedAt,
         delivery_radius: data.deliveryRadius,
         currency: data.currency,
-        commission: data.commission
+        commission: data.commission,
+        delivery_fee_minor: data.deliveryFeeMinor ?? 0
     }).returning(BRANCH_COLUMNS);
 
     return toEntity(row);
@@ -60,8 +69,8 @@ export async function findBranchById(id: number): Promise<Branch | undefined> {
     return row ? toEntity(row) : undefined;
 }
 
-export async function updateBranch(id: number, data: Record<string, any>): Promise<Branch> {
-    const [row] = await db("restaurant_branches").where("id", id).update({
+export async function updateBranch(id: number, data: Record<string, any>, conn: Knex = db): Promise<Branch> {
+    const [row] = await conn("restaurant_branches").where("id", id).update({
         label: data.label,
         address_text: data.addressText,
         lat: data.lat,
@@ -71,13 +80,14 @@ export async function updateBranch(id: number, data: Record<string, any>): Promi
         delivery_radius: data.deliveryRadius,
         currency: data.currency,
         accept_orders: data.acceptOrders,
+        delivery_fee_minor: data.deliveryFeeMinor,
         updated_at: new Date(),
     }).returning(BRANCH_COLUMNS);
     return toEntity(row);
 }
 
-export async function updateBranchStatus(id: number, data: {isActive?: boolean, commission?: number}): Promise<Branch> {
-    const [row] = await db("restaurant_branches").where("id", id).update({
+export async function updateBranchStatus(id: number, data: {isActive?: boolean, commission?: number}, conn: Knex = db): Promise<Branch> {
+    const [row] = await conn("restaurant_branches").where("id", id).update({
         is_active: data.isActive,
         commission: data.commission,
         updated_at: new Date(),

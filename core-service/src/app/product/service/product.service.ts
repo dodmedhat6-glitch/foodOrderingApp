@@ -8,6 +8,9 @@ import {createProduct, findProductById, findProductsByBranch, findProductsByRest
 import {findCategoryByName, findCategoriesByRestaurant, createCategory} from "../repository/category.repository";
 import {updateBranchDetails} from "../repository/product-branch-details.repository";
 import {injectable} from "tsyringe";
+import {db} from "../../../lib/knex/kenx";
+import {enqueueOutboxEvent} from "../../outbox/repository/outbox.repo";
+import {buildInvalidationPayload, invalidationChannel, invalidationEventType} from "../../../lib/events/events";
 
 @injectable()
 export class ProductService {
@@ -83,20 +86,42 @@ export class ProductService {
             categoryId = category.id;
         }
 
-        const updatedProduct = await updateProduct(productId, {
-            name: data.name,
-            description: data.description,
-            imageUrl: data.imageUrl,
-            categoryId,
-        });
+        const hasBranchDetailsChange = Boolean(branchId) && (data.price !== undefined || data.stock !== undefined || data.isAvailable !== undefined);
 
+        const trx = await db.transaction();
+        let updatedProduct;
         let branchDetails;
-        if (branchId && (data.price !== undefined || data.stock !== undefined || data.isAvailable !== undefined)) {
-            branchDetails = await updateBranchDetails(branchId, productId, {
-                price: data.price,
-                stock: data.stock,
-                isAvailable: data.isAvailable,
-            });
+        try {
+            updatedProduct = await updateProduct(productId, {
+                name: data.name,
+                description: data.description,
+                imageUrl: data.imageUrl,
+                categoryId,
+            }, trx);
+
+            if (hasBranchDetailsChange) {
+                branchDetails = await updateBranchDetails(branchId!, productId, {
+                    price: data.price,
+                    stock: data.stock,
+                    isAvailable: data.isAvailable,
+                }, trx);
+
+                // order-service caches product price/stock/isAvailable
+                // (cache:core:product:{id}) and must invalidate on this exact
+                // write - see docs/01-system-design.md §5.1 on the order-service side.
+                await enqueueOutboxEvent({
+                    channel: invalidationChannel("product"),
+                    eventType: invalidationEventType("product"),
+                    entityType: "product",
+                    entityId: productId,
+                    payload: buildInvalidationPayload(productId),
+                }, trx);
+            }
+
+            await trx.commit();
+        } catch (error) {
+            await trx.rollback();
+            throw error;
         }
 
         return {product: updatedProduct, branchDetails};

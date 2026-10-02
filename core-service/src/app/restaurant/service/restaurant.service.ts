@@ -14,6 +14,9 @@ import {RestaurantNotFoundError} from "../errors";
 import {UnAuthorisedError} from "../../../lib/auth/error";
 import {injectable} from "tsyringe";
 import {buildPaginationResult, FilterParams, PaginationParams} from "../../../lib/http/pagination/cursor.pagination";
+import {db} from "../../../lib/knex/kenx";
+import {enqueueOutboxEvent} from "../../outbox/repository/outbox.repo";
+import {buildInvalidationPayload, invalidationChannel, invalidationEventType} from "../../../lib/events/events";
 
 
 @injectable()
@@ -60,6 +63,25 @@ export class RestaurantService{
         if (!restaurant) {
             throw RestaurantNotFoundError;
         }
-        return await updateRestaurantStatus(id, data.status);
+
+        // restaurant operational status is cached by order-service
+        // (cache:core:restaurant:{id}) - write + invalidation event commit
+        // together via the outbox, same reasoning as branch.service.ts.
+        const trx = await db.transaction();
+        try {
+            const updated = await updateRestaurantStatus(id, data.status, trx);
+            await enqueueOutboxEvent({
+                channel: invalidationChannel("restaurant"),
+                eventType: invalidationEventType("restaurant"),
+                entityType: "restaurant",
+                entityId: id,
+                payload: buildInvalidationPayload(id),
+            }, trx);
+            await trx.commit();
+            return updated;
+        } catch (error) {
+            await trx.rollback();
+            throw error;
+        }
     }
 }

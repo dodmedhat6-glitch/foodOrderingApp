@@ -45,6 +45,15 @@ export function rbac(options: RBACOptions) {
                 // pass
                 return next();
             }
+            // if it's another service authenticated via api-key (see api-key.guard.ts) ->
+            // same permission lookup, keyed by the role attached to its api_keys row
+            if (req.user.role == SystemRole.SERVICE_ACCOUNT) {
+                const permissions = await permissionCashService.getPermissions(req.user.serviceRole!);
+                if (!permissionCashService.hasPermissions(permissions, resource, action)) {
+                    return sendError(res, "Permission denied", 403)
+                }
+                return next();
+            }
             // if not restaurant ser -> throw err
             return sendError(res, "Permission denied", 403)
         }
