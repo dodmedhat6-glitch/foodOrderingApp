@@ -1,10 +1,34 @@
 /**
  * Cross-service event catalog for the core-service -> order-service link.
- * Channel/payload shape here is a fixed contract: order-service's
- * `lib/cache/invalidation-subscriber.ts` psubscribes to `core:invalidate:*`
- * and expects a JSON payload with an `id` field (see order-service's
- * docs/01-system-design.md §5.1). Changing either side without the other
- * breaks cache invalidation silently.
+ *
+ * Nothing here publishes. Callers enqueue an outbox row in the same
+ * transaction as the domain write (see app/outbox/repository/outbox.repo.ts
+ * `enqueueOutboxEvent`); worker.ts drains those rows onto the `core.events`
+ * topic exchange with publisher confirms. `eventType` is the AMQP routing
+ * key, so `core.<entity>.invalidated` is the contract order-service binds
+ * against: queue `order-service.core-events`, binding `core.#`, handled in
+ * its `lib/core-events/handlers.ts`.
+ *
+ * Two halves of that contract are load-bearing, and changing either side
+ * alone breaks cache invalidation silently:
+ *
+ *  - The routing key shape. A `core.*` binding would match none of these,
+ *    hence `core.#` on the consumer.
+ *  - The payload: `{ id, occurredAt }`. The drain wraps it in an envelope
+ *    carrying eventId/eventType/entityType/entityId, and order-service
+ *    dedupes on eventId since delivery is at-least-once.
+ *
+ * We deliberately emit one coarse invalidated event per entity type rather
+ * than fine-grained ones (no stock.changed, price.changed, deactivated,
+ * suspended). order-service relies on that: deleting its branch projection
+ * is enough, because the next order placement re-reads from core and sees
+ * the current acceptOrders/status. See order-service's docs/system-design.md
+ * and docs/implementation-plan.md Phase 1.
+ *
+ * `invalidationChannel` is vestigial: it names the Redis Pub/Sub channel
+ * from the design that preceded RabbitMQ, and is still persisted in
+ * outbox_events.channel, but the drain routes on `eventType` alone and
+ * nothing reads the column. Safe to drop together with the column.
  */
 
 export type InvalidatedEntityType = "product" | "branch" | "restaurant" | "address" | "user";
