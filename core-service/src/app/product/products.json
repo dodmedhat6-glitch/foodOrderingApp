@@ -1,0 +1,26 @@
+[
+  {
+    "id": 1770141466527,
+    "name": "Laptop",
+    "price": 9999,
+    "quantity": 10
+  },
+  {
+    "id": 1770149960241,
+    "name": "Laptop",
+    "price": 9999,
+    "quantity": 10
+  },
+  {
+    "id": 1770591875277,
+    "name": "Laptop",
+    "price": 9999,
+    "quantity": 10
+  },
+  {
+    "id": 1770591884854,
+    "name": "Laptop2",
+    "price": 9999,
+    "quantity": 10
+  }
+]
