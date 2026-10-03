@@ -36,6 +36,11 @@ export class CreateBranchDTO {
 
     @IsEnum(Currency)
     currency!: Currency
+
+    @IsOptional()
+    @IsInt()
+    @Min(0)
+    deliveryFeeMinor?: number;
 }
 
 export class UpdateBranchDTO {
@@ -79,6 +84,11 @@ export class UpdateBranchDTO {
     @IsOptional()
     @IsBoolean()
     acceptOrders?: boolean;
+
+    @IsOptional()
+    @IsInt()
+    @Min(0)
+    deliveryFeeMinor?: number;
 }
 
 export class UpdateBranchStatusDTO {

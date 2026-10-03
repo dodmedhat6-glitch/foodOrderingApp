@@ -22,10 +22,14 @@ const schema = z.object({
     REDIS_HOST: z.string().default("localhost"),
     REDIS_PORT: z.string().default("6379"),
     REDIS_PASSWORD: z.string().optional(),
+    RABBIT_URL: z.string().default("amqp://localhost:5672"),
+    RABBIT_EXCHANGE: z.string().default("core.events"),
+    RABBIT_BATCH_SIZE: z.string().default("50"),
     MAILJET_API_KEY: z.string(),
     MAILJET_SECRET_KEY: z.string(),
     MAILJET_FROM_EMAIL: z.string(),
     MAILJET_FROM_NAME: z.string(),
+    ORDER_SERVICE_API_KEY: z.string(),
 })
 
 const parsed = schema.parse(process.env)
@@ -61,10 +65,24 @@ export const env = {
         password: parsed.REDIS_PASSWORD
     },
 
+    rabbit: {
+        url: parsed.RABBIT_URL,
+        exchange: parsed.RABBIT_EXCHANGE,
+        batchSize: Number(parsed.RABBIT_BATCH_SIZE)
+    },
+
     mailjet: {
         apiKey: parsed.MAILJET_API_KEY,
         secretKey: parsed.MAILJET_SECRET_KEY,
         fromEmail: parsed.MAILJET_FROM_EMAIL,
         fromName: parsed.MAILJET_FROM_NAME
+    },
+
+    // service-to-service API keys, keyed by consumer name. The plaintext only
+    // ever exists here (to seed/rotate the stored hash) and on the calling
+    // service's own side - core-service never persists it, only its hash
+    // (see pkg/api-key/hash.ts, app/rbac/repository/api-key.repo.ts).
+    serviceApiKeys: {
+        orderService: parsed.ORDER_SERVICE_API_KEY
     }
 }

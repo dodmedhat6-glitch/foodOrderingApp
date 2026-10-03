@@ -15,7 +15,7 @@ export function errorHandler(err: AppError, req: Request, res: Response, _next: 
     })
 
     if(operational){
-        return sendError(res, err.message, err.statusCode)
+        return sendError(res, err.message, err.statusCode, err.details)
     }
     return sendError(res, "Something went wrong", 500)
 }

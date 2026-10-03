@@ -1,3 +1,4 @@
+import {Knex} from "knex";
 import {db} from "../../../lib/knex/kenx";
 import {Product} from "../entity/product.entity";
 
@@ -77,8 +78,55 @@ export async function findProductsByBranch(branchId: number) {
     }));
 }
 
-export async function updateProduct(id: number, data: Record<string, any>): Promise<Product> {
-    const [row] = await db("products").where("id", id).update({
+export interface ProductBranchLookupRow {
+    id: number;
+    branchId: number;
+    name: string;
+    imageUrl: string | null;
+    unitPriceMinor: number;
+    isAvailable: boolean;
+    stock: number;
+}
+
+/**
+ * Batched by design (one query for N ids) - used by app/internal's
+ * getProducts endpoint, order-service's only product lookup path
+ * (never N sequential calls, see order-service docs/01-system-design.md §3.1).
+ */
+export async function findProductsByIdsAndBranch(ids: number[], branchId: number): Promise<ProductBranchLookupRow[]> {
+    if (ids.length === 0) {
+        return [];
+    }
+
+    const rows = await db("products as p")
+        .join("product_branch_details as pbd", "p.id", "pbd.product_id")
+        .whereIn("p.id", ids)
+        .where("pbd.branch_id", branchId)
+        .whereNull("p.deleted_at")
+        .select(
+            "p.id",
+            "p.name",
+            "p.image_url",
+            "pbd.price",
+            "pbd.stock",
+            "pbd.is_available",
+        );
+
+    return rows.map((row: any) => ({
+        // bigint -> string from pg; ProductBranchLookupRow declares number, and
+        // order-service keys its basket off these ids.
+        id: Number(row.id),
+        branchId,
+        name: row.name,
+        imageUrl: row.image_url,
+        unitPriceMinor: row.price,
+        isAvailable: row.is_available,
+        stock: row.stock,
+    }));
+}
+
+export async function updateProduct(id: number, data: Record<string, any>, conn: Knex = db): Promise<Product> {
+    const [row] = await conn("products").where("id", id).update({
         name: data.name,
         description: data.description,
         image_url: data.imageUrl,

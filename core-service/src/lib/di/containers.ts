@@ -15,11 +15,14 @@ import { ProductController } from "../../app/product/controller/product.controll
 import { CustomerAddressService } from "../../app/addresses/service/customer-address.service";
 import { CustomerAddressController } from "../../app/addresses/controller/customer-address.controller";
 import { PermissionsCashService } from "../../app/rbac/service/permissions-cash.service";
+import { InternalService } from "../../app/internal/service/internal.service";
+import { InternalController } from "../../app/internal/controller/internal.controller";
 import { Logger } from "../logger/logger";
 import {cacheProvider} from "../cache/init";
 import {mailjetProvider} from "../../pkg/email/mailjet";
 import {env} from "../config/env";
 import {emailProvider} from "../email/init";
+import {messageBroker} from "../message-broker/init";
 
 container.registerSingleton(tokens.AuthService, AuthService);
 container.registerSingleton(tokens.AuthController, AuthController);
@@ -45,8 +48,11 @@ container.registerSingleton(tokens.CustomerAddressController, CustomerAddressCon
 container.registerSingleton(tokens.PermissionCashService, PermissionsCashService);
 container.registerSingleton(tokens.Logger, Logger);
 
+container.registerSingleton(tokens.InternalService, InternalService);
+container.registerSingleton(tokens.InternalController, InternalController);
 
 container.registerInstance(tokens.CacheProvider, cacheProvider);
 container.registerInstance(tokens.EmailProvider, emailProvider)
+container.registerInstance(tokens.MessageBroker, messageBroker)
 
 export { container };

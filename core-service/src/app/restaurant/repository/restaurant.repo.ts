@@ -91,9 +91,9 @@ export async function updateRestaurant(id: number, data: {name?: string, logoUrl
     return toEntity(row);
 }
 
-export async function updateRestaurantStatus(id: number, status: string): Promise<RestaurantEntity> {
+export async function updateRestaurantStatus(id: number, status: string, conn: Knex = db): Promise<RestaurantEntity> {
     const now = new Date();
-    const [row] = await db("restaurants").where("id", id).update({
+    const [row] = await conn("restaurants").where("id", id).update({
         status,
         status_updated_at: now,
         updated_at: now,

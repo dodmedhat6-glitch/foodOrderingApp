@@ -6,6 +6,9 @@ import {SystemRole} from "../../user/enums";
 import {CreateBranchDTO, UpdateBranchDTO, UpdateBranchStatusDTO} from "../dto/branch.dto";
 import {findNearbyBranches, createBranch, findBranchesByRestaurant, findBranchById, updateBranch, updateBranchStatus} from "../repository/branch.repository";
 import {injectable} from "tsyringe";
+import {db} from "../../../lib/knex/kenx";
+import {enqueueOutboxEvent} from "../../outbox/repository/outbox.repo";
+import {buildInvalidationPayload, invalidationChannel, invalidationEventType} from "../../../lib/events/events";
 
 @injectable()
 export class BranchService {
@@ -41,6 +44,7 @@ export class BranchService {
             currency: data.currency,
             deliveryRadius: data.deliveryRadius,
             commission: 0,
+            deliveryFeeMinor: data.deliveryFeeMinor ?? 0,
             createdAt: now,
             updatedAt: now,
             acceptOrders: true,
@@ -61,7 +65,28 @@ export class BranchService {
             throw UnAuthorisedError;
         }
 
-        return await updateBranch(branchId, data);
+        // acceptOrders is operational status order-service caches - see
+        // this.updateStatus for why both writers go through the outbox.
+        if (data.acceptOrders === undefined) {
+            return await updateBranch(branchId, data);
+        }
+
+        const trx = await db.transaction();
+        try {
+            const updated = await updateBranch(branchId, data, trx);
+            await enqueueOutboxEvent({
+                channel: invalidationChannel("branch"),
+                eventType: invalidationEventType("branch"),
+                entityType: "branch",
+                entityId: branchId,
+                payload: buildInvalidationPayload(branchId),
+            }, trx);
+            await trx.commit();
+            return updated;
+        } catch (error) {
+            await trx.rollback();
+            throw error;
+        }
     }
 
     updateStatus = async (branchId: number, userRole: SystemRole, data: UpdateBranchStatusDTO) => {
@@ -74,6 +99,27 @@ export class BranchService {
             throw BranchNotFoundError;
         }
 
-        return await updateBranchStatus(branchId, data);
+        // isActive is operational status order-service caches
+        // (cache:core:branch:{id}) - the write and the invalidation event
+        // must commit together, or a branch core-service has just closed
+        // can silently keep accepting orders on order-service's stale read.
+        const trx = await db.transaction();
+        try {
+            const updated = await updateBranchStatus(branchId, data, trx);
+            if (data.isActive !== undefined) {
+                await enqueueOutboxEvent({
+                    channel: invalidationChannel("branch"),
+                    eventType: invalidationEventType("branch"),
+                    entityType: "branch",
+                    entityId: branchId,
+                    payload: buildInvalidationPayload(branchId),
+                }, trx);
+            }
+            await trx.commit();
+            return updated;
+        } catch (error) {
+            await trx.rollback();
+            throw error;
+        }
     }
 }
