@@ -16,3 +16,5 @@ coverage/
 
 # IDE
 .idea/
+
+/core-service/.mcp.json

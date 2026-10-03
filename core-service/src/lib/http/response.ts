@@ -18,10 +18,10 @@ export function sendSuccess<T>(res: Response , data?: T, statusCode = 200, meta?
     res.status(statusCode).json(body);
 }
 
-export function sendError(res: Response, message: string, statusCode: number): void {
+export function sendError(res: Response, message: string, statusCode: number, details?: Record<string, unknown>): void {
     res.status(statusCode).json({
         success: false,
-        data: {message}
+        data: {message, ...(details ?? {})}
     });
 }
 
