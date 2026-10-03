@@ -1,0 +1,11 @@
+node_modules/
+dist/
+.env
+.env.*.bak
+*.log
+.DS_Store
+.idea/
+.vscode/
+
+# local experimentation scripts — not tracked
+play/

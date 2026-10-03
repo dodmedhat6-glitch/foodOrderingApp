@@ -1,0 +1,2 @@
+# Knex needs this directory to exist even while it is empty.
+# Phase 1 drops the first migrations here (orders, order_items, idempotency_keys).
