@@ -199,7 +199,7 @@ These belong on `core-service` and must land before this service's Phase 0 is co
    - `idempotency-store.ts` — `tryGet`, `store`. Activate the DB-fallback hook in `lib/idempotency/idempotency.ts` now that the table exists.
 6. `order-status.service.ts` — pure helper: `assertTransition(from, to, actor)` table-driven from `enums.ts`.
 7. `order.service.ts` —
-   - `placeOrder(...)` per Orders.md §2 (validate via core-client cached → compute money → trx → after-commit reserveStock).
+   - `placeOrder(...)` per Orders.md §2 (validate via core-client cached → compute money → reserveStock → trx → releaseStock on failure).
    - `getOrder(...)`: by publicId; ownership check; loads items batch + payment summary (joins).
    - `listCustomerOrders(...)`, `listRestaurantOrders(...)` with cursor pagination.
    - `updateStatus(...)`: validates transition, stamps timestamp, publishes WS (WS publisher is wired; events are emitted but the client wiring test moves to Phase 6).
@@ -207,7 +207,7 @@ These belong on `core-service` and must land before this service's Phase 0 is co
 9. `routes.ts` — `authenticate`, `idempotency({strict:true})` on `POST /orders`, `withCache(10)` on `GET /restaurant/orders` per branch+status.
 10. Register controller + service in DI container. Mount in `src/routes.ts`.
 11. **Core-client endpoint wrappers added now**:
-    - `branch.client.ts` — `getBranch`, `getBranchProducts(branchId, productIds[])`, `reserveStock(branchId, items[])`.
+    - `branch.client.ts` — `getBranch`, `reserveStock(branchId, items[])`, `releaseStock(branchId, items[])`; `product.client.ts` — `getBranchProducts(branchId, productIds[])`.
     - `address.client.ts` — `getCustomerAddress(id)`.
 12. **Register core-event handlers** (in the Phase 0 consumer registry):
     - `product.stock.changed` → invalidate `core:product:price:*` and `core:product:stock:*` for the affected branch+product.
@@ -221,7 +221,8 @@ All of the following go under `/api/internal/*` (guarded by the API-key middlewa
 
 - `GET /api/internal/branches/:id` — branch metadata: `{ id, region, restaurantId, restaurantStatus, acceptOrders, isActive, deliveryFee, commissionBps, currency, lat, lng, name, addressText }`. Lives on the branch module's router (inline internal route).
 - `GET /api/internal/branches/:id/products?ids=1,2,3` — batch price + stock + availability + name + image URL for the requested product IDs. Lives on the product module's router.
-- `POST /api/internal/branches/:id/reserve-stock` — body `{ items: [{ productId, quantity }] }`. Atomic decrement inside one core-service DB trx; returns 409 with offending items on underflow. Idempotent via `Idempotency-Key`. Lives on the product module's router.
+- `POST /api/internal/branches/:id/reserve-stock` — body `{ items: [{ productId, quantity }] }`. Atomic decrement inside one core-service DB trx; returns 409 with offending items on underflow. **Not** idempotent on core's side (it has no idempotency layer on its internal surface); this service's strict idempotency on `POST /orders` is what prevents a double decrement.
+- `POST /api/internal/branches/:id/release-stock` — the compensating call, same body shape. Increments, all-or-what-it-can: lines whose branch product row is gone come back in `missing` rather than failing the release, because the caller is already compensating a failure.
 - `GET /api/internal/customer-addresses/:id` — returns `{ id, userId, lat, lng, addressText, city, country, building, apartmentNumber, label }` for the delivery snapshot. Lives on the customer-address module's router.
 - `GET /api/internal/agents/:id` — returns `{ id, name, phone }` for an agent. Lives on the user module's router.
 - `GET /api/internal/rbac/permissions?role=<name>` — returns the permission list for a role (used by the RBAC cache). Lives on the rbac module's router.
@@ -287,6 +288,15 @@ publish `product.stock.changed`, `product.price.changed`, `branch.deactivated`,
   same transaction. Guarded by a new `core:product:reserve` permission
   (migration `20261002090100`), deliberately distinct from `core:product:update`
   so this service can move stock and nothing else.
+- `POST /api/internal/branches/:branchId/release-stock` **added** — the
+  compensating half, required once stock is reserved *before* the order rows are
+  written. Increments under the same lock order so a release cannot deadlock
+  against a concurrent reserve; reports `missing` lines instead of failing;
+  publishes the same enriched product event per line. Gated on the *same*
+  `core:product:reserve` permission rather than a new one — holding units and
+  giving them back are two directions of one capability, and a caller allowed to
+  do the first must be able to do the second or it leaks stock on every failed
+  placement.
 - `orders:* / payments:* / deliveries:* / finance:*` permissions seeded and
   mapped onto `owner` / `branch_manager` / `staff` (migration
   `20261002090100`). This plan's Phase 0 §0.5 called for them; they had never
@@ -327,15 +337,45 @@ the checklist above:
   `idx_order_items_order_id` on their respective paths — no sequential scans.
 - Concurrency: two simultaneous `accepted` transitions → one 200, one 409
   (compare-and-set on the current status); two simultaneous orders for the last
-  unit → one `placed`, one 409 `OutOfStock` with the order voided as
-  `out_of_stock_post_commit`.
+  unit → one `placed`, one 409 `OutOfStock`. Since stock is now reserved before
+  the insert, the loser never gets an order row at all — there is nothing to
+  void, and the `out_of_stock_post_commit` status reason is gone with it.
 - Cache: `X-Cache: MISS` then `HIT` on the restaurant list, and a status
   transition clears every cached filter permutation for that branch.
 
-**Not verified:** the RabbitMQ round trip — the broker is not installed in this
-environment. The handlers themselves are verified directly against Redis by
-`play/test-core-events.ts` (11 checks); `play/test-rabbit.ts` covers the broker
-path and skips cleanly until RabbitMQ is up.
+Also verified, after the reserve-before-write change:
+
+- `play/test-core-events.ts` (27 checks) — both branches of every handler
+  against real Redis: the patch path (projection corrected in place, unrelated
+  fields intact, reject-new-orders flag raised and cleared), the drop path
+  (flagless or branchless payload, non-boolean flag not coerced), a patch for an
+  uncached key creating nothing, the DLQ path for a payload with no id, the
+  dedupe gate, and MGET ordering.
+- `play/test-order-cycle.ts` — the live cycle across both services: stock
+  decremented by exactly the basket, flat service fee on the total, a replayed
+  `Idempotency-Key` answered from the record *without* reserving again, an
+  out-of-stock basket refused having reserved nothing, reserve → release
+  returning the units, a release of an unknown product reported as `missing`,
+  warm branch/product/permission projections, and `X-Cache: MISS` then `HIT` on
+  the dashboard.
+- `play/test-stock-compensation.ts` — the compensation path, provoked by
+  pointing the `eg` shard at a database that does not exist: the reserve
+  succeeds, `conn.transaction()` fails, and core's stock is back at its
+  starting figure.
+- `play/test-rabbit.ts` — **the RabbitMQ round trip, previously unverified
+  because no broker was installed.** RabbitMQ 4.3.5 is now running locally. Both
+  payload shapes survive the AMQP hop: a flagless event drops the projection, an
+  enriched one patches it and drives the reject-new-orders flag, a stock event
+  patches `stock` without touching price or name, a replayed `eventId` is
+  deduped, and an unhandled type is acked rather than dead-lettered.
+- `play/test-outbox-chain.ts` — the whole chain with nothing simulated:
+  placement → core's reserve transaction (decrement + outbox row) → core's
+  outbox worker → `core.events` → this service's consumer → projection patched
+  to core's new stock. Then the branch half through core's own HTTP surface:
+  closing branch 1 raises the reject-new-orders flag here and the next placement
+  is refused with `BranchNotAcceptingOrders` — off the event alone, no TTL and
+  no upstream re-read — and reopening clears it. Then core's own branch-lookup
+  cache: populated by a placement, dropped by a branch write.
 
 ---
 
@@ -374,6 +414,162 @@ path and skips cleanly until RabbitMQ is up.
 - `POST /payments/init` creates a Kashier session (mock in tests), persists `payment_sessions`.
 - Webhook end-to-end: signed payload → order moves to `placed`, transaction recorded. Duplicate webhook → 200 with no side effect.
 - Refund flow: POST → Kashier mock 2xx → transaction `pending` → simulated webhook → `succeeded`, charge marked `is_refunded`.
+
+### Deviations as built
+
+**1. Kashier has no webhook secret.** This plan's §0.1 listed
+`KASHIER_WEBHOOK_SECRET` and `KASHIER_FAIL_URL`; neither exists in the v3 API.
+The webhook HMAC is keyed with the **Payment API Key** — the same credential
+that goes in the `api-key` header on session creation — and v3 has no separate
+failure URL, only a boolean `failureRedirect` (we send `false`, so a declined
+card stays on Kashier's page and the customer can retry inside the same
+session). Env is `KASHIER_API_KEY` (payment key, also the HMAC key),
+`KASHIER_SECRET_KEY` (the `Authorization` credential), `KASHIER_RETURN_URL`,
+and an optional `KASHIER_SERVER_WEBHOOK_URL` for per-session delivery on a
+developer machine.
+
+**2. The signature covers a projection of the payload, not the bytes.** Kashier
+sends a `signatureKeys` array inside `data` naming which of its own fields were
+signed; the payload is those keys sorted, each `key=urlencode(value)`, joined
+with `&`. Two consequences shape the design: there is no raw-body middleware to
+add (`express.json()` is enough), and **every field outside `signatureKeys` is
+unauthenticated** — which is why the region travels inside `merchantOrderId`
+rather than in `metaData`. The implementation is pinned to Kashier's published
+worked example in `play/test-kashier-signature.ts`.
+
+**3. `merchant_order_ref` — a new column, and the webhook's only handle.**
+Kashier's webhook carries no session id. It identifies the payment by the
+`order` reference *we* chose, echoed back as `merchantOrderId`, which is also
+one of the signed fields. It cannot simply be the order's public id: Kashier
+rejects a duplicate order reference per merchant (`ERR_ORD_02`), so a retry
+after a failed payment needs a fresh one. Format is
+`<region>_<publicId>_<attempt>` — region because a webhook arrives with no
+`X-Region` header, public id because it is a UUIDv7 whose timestamp prunes the
+partition scan, attempt because the provider will not reuse a reference.
+
+**4. No FK from `payment_sessions` or `transactions` to `orders`.**
+`docs/database-design.md` §3.4/§3.5 declare `REFERENCES orders(id)`, which
+Postgres will not create: `orders` is RANGE-partitioned and a FK into it needs a
+unique index containing the partition key. Same resolution as `order_items` —
+logical references, written by services that already hold the order. Both tables
+also gained `order_public_id` so the settle and read paths can derive a
+`created_at` window instead of scanning every month.
+
+**5. `payment_sessions.provider_order_id` and `expires_at` added.** The refund
+endpoint is addressed by *Kashier's* order id, which only arrives with the first
+webhook; the session is the row that represents the Kashier order, so it holds
+it. `expires_at` is what `POST /payments/init` returns and what the sweep scans.
+
+**6. `payment_webhook_events.event_type` added**, and `provider_event_id` is
+`<transactionId>:<status>` rather than a bare id — Kashier's own guidance, and
+necessary: one transaction legitimately reports `PENDING` and then `SUCCESS`,
+and those are two facts, not a duplicate.
+
+**7. A payment-expiry sweep was added** (`lib/jobs/payment-expiry.ts`,
+`PAYMENT_SESSION_TIMEOUT_MIN` / `PAYMENT_EXPIRY_SWEEP_INTERVAL_SEC`). This plan
+scheduled no worker for Phase 2, but an online order reserves its stock in core
+*before* the order row exists, so an abandoned checkout holds units out of
+circulation indefinitely. The sweep closes the session, cancels the order with
+`status_reason = 'payment_session_expired'`, and releases the stock back to
+core. Everything in it is a compare-and-set, so a capture landing mid-sweep
+wins. `docs/business-logic/payments.md` §9 already assumed this job existed.
+
+**8. The webhook service is `payment-webhook.service.ts`, not
+`kashier-webhook.service.ts`.** Nothing in it is Kashier-specific — signature,
+payload vocabulary and event mapping all sit behind `IPaymentProvider` in
+`pkg/payments/`. A second acquirer is a second adapter, not a second service.
+
+**9. Refunds settle FIFO, not by provider reference alone.** Observed in the
+live test pass: Kashier returned the *same* `transactionId` for two separate
+refunds on one order. The reference identifies the order's refund stream, not a
+single refund, so `findPendingRefundToSettle` narrows by reference when that
+narrows anything and otherwise takes the oldest pending refund on the order.
+
+**10. `POST /orders` auto-initialises the session for online orders** (plan item
+10, taken up). The placement response carries `payment: {sessionId,
+redirectUrl}`. It is best-effort: the order is already committed and its stock
+already held, so a provider failure returns the order without a `payment` block
+rather than failing a placement that succeeded. `POST /payments/init` still
+works standalone and returns the *same* session while one is live.
+
+**11. `OrderService` gained four methods for the payment module** —
+`findByPublicId`, `transitionBySystem`, `cancelUnpaidOrder`, `announcePlacement`
+and the public `assertCanRead`. The payment module injects `OrderService`
+normally; `OrderService` resolves `PaymentService` from the container at call
+time (type-only import), because the dependency genuinely runs both ways and a
+constructor cycle would not resolve.
+
+**12. The Phase 1 approximation in `OrderService.paymentSummary` is gone.** The
+order detail's payment block is now computed from the ledger by
+`PaymentService.summarizeForOrder`, so a captured-then-refunded order no longer
+reads the same as a cancelled one.
+
+**13. No `payments:refund` permission.** Refunding is `requireRole(SYSTEM_ADMIN)`
+rather than an `rbac()` check, because core's catalog seeds no such permission
+and inventing one here would be inventing a permission core doesn't know about.
+`GET /payments/{id}` does use `rbac({payments:read})`, which core does seed, onto
+`owner`.
+
+### Verified by the Phase 2 manual pass
+
+Two **real** payments on Kashier's hosted checkout, paid in a browser with its
+3D-Secure test card, delivered back as genuine signed webhooks over a
+cloudflared tunnel — 60.10 EGP and 105.10 EGP, both captured, both orders moved
+`pending_payment → placed`, both ledgers written. Then a **real full refund**
+through `POST /api/payments/{id}/refund` against the live test API: Kashier
+accepted it (202, row `pending`), and its own `refund` webhook arrived minutes
+later and settled the row to `succeeded` with the charge flagged `is_refunded`.
+Nothing in that sentence is mocked.
+
+On top of that, 58 checks in `play/test-payment-cycle.ts`, 14 in
+`play/test-kashier-signature.ts` and 6 in `play/test-payment-ws.ts`:
+
+- **Signature**: matches Kashier's published digest for its published payload;
+  rejects a wrong key, a missing header, a truncated digest, a tampered amount,
+  a tampered status, a `FAILURE` re-labelled `SUCCESS`, and a payload with no
+  `signatureKeys`. Sorting is applied, so key order on the wire doesn't matter.
+- **De-dup**: the real captured webhook replayed verbatim → 200, no second
+  ledger row, still one event row.
+- **Forgery**: a validly signed capture for an amount that doesn't match the
+  session credits nothing, leaves the order unpaid and the session
+  uncaptured, and is stamped `process_error = 'AmountMismatch'`.
+- **Not ours**: signed webhooks naming an unknown order, an unparseable
+  reference, or an unconfigured region are acknowledged and logged rather than
+  500ing; an unknown provider in the path is 404.
+- **Declined card**: session `failed`, a `failed` charge row for the audit
+  trail, order still `pending_payment`; the retry opens attempt `_2` with a new
+  Kashier session, captures, and the ledger shows both attempts.
+- **init**: re-uses a live session instead of creating a second; replayed
+  `Idempotency-Key` returns the recorded response; same key with a different
+  body → 409; no key → 400; another customer → 404; a restaurant user → 403; no
+  region → 400; a COD order → 409 `OrderNotOnlinePayment`; an already-paid order
+  → 409 `OrderNotPendingPayment`; an unknown order → 404.
+- **GET /payments/{id}**: admin and the owning restaurant's owner can read it;
+  another restaurant's owner gets 404; a customer gets 403 (no `payments:read`);
+  unknown id 404, non-numeric 400. The body is the DTO — no `region`, no
+  `idempotencyKey`, no internal order id.
+- **Refunds**: an owner cannot refund (403); no reason → 400; more than the
+  charge → 409 `RefundExceedsCharge`; a failed charge → 409
+  `NotARefundableCharge`; a partial refund leaves `is_refunded` false and shows
+  up in the order's payment summary.
+- **Expiry sweep**: placing an online order decrements core's stock; ageing the
+  session past `expires_at` and running the sweep closes the session, cancels
+  the order with the right reason, and **returns the units to core**; a second
+  sweep is a no-op; a capture arriving after the sweep does not un-cancel the
+  order but its money is still recorded for an operator to refund.
+- **WebSocket**: the customer gets `payment.failed` on a decline and
+  `payment.captured` + `order.status_changed` on a capture; the branch gets
+  `order.created` only on capture, carrying the summary DTO; a failed payment
+  announces nothing to the kitchen.
+- **Indexes**: `play/explain-payments.ts` runs `EXPLAIN` over all eleven queries
+  Phase 2 added — every one reaches an index, none falls back to a sequential
+  scan.
+
+Not verified, and why: a **wallet** payment (Kashier's sandbox forces card and
+wallet into the checkout but its wallet test numbers need a real wallet
+provider round trip), and `void` / `reversal` webhooks (acknowledged and logged
+by design — writing a handler against an event we have never seen in production
+would be a guess).
 
 ---
 

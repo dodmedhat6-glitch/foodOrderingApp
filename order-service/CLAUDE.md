@@ -274,7 +274,11 @@ The default export `defaultDb` exists only for migrations and shared (non-sharde
 
 - Read-heavy endpoints use `withCache(ttl, userScoped)`.
 - Cache invalidation: explicit `cacheProvider.del(key)` calls in the service after mutating writes. Do **not** rely on TTL alone for user-facing data.
-- Per-region cache namespacing: keys must be prefixed with the region (`eg:order:123`).
+- Per-region cache namespacing: keys must be prefixed with the region (`eg:order:123`). Projections of core's data are the exception and are deliberately **not** region-prefixed — see `lib/core-client/cache-keys.ts`.
+- **Each service has its own Redis in production.** Nothing may assume a key written by core is visible here, or vice versa. The `core:*` keys in this service are *our* projections of core's data, not a shared cache; core's own caches live under its own prefixes in its own instance.
+- **Hot upstream reads are cached on both sides of the call.** `GET /api/internal/branches/:id` is read on every single placement, so it is cached here (`core:branch:<id>`, 60s) *and* in core's `InternalService.getBranch` (300s, invalidated explicitly by its branch and restaurant writers). The two are independent; neither is load-bearing for correctness.
+- What to cache is a question about read rate, not about convenience: the branch projection, the product projections and the role-permission projection are hot (every placement, every restaurant request). A customer address is **not** — a customer places one or two orders a day, a cached address buys nothing, and a stale one means delivering to the wrong place. Read it through every time.
+- **A per-key cache must still be one round trip.** The product projection is keyed per branch+product, because that is the granularity core's invalidation events arrive at and the granularity two overlapping baskets share. N sequential `get`s would pay N network latencies and hand that win straight back, so batch reads go through `getMany` (MGET) and batch writes through `setMany` (pipeline). A per-key cache read in a loop is a bug, the same way an N+1 query is.
 
 ### Auth
 
@@ -329,23 +333,116 @@ This service does **not** emit outbound async events to anyone in this milestone
   - Consumer queue: `order-service.core-events` (durable, declared by this service).
   - Bindings: `core.#` (multi-word match — `*` matches one segment and would miss `core.branch.invalidated`).
   - DLQ: `order-service.core-events.dlq` for poison messages (routed via the queue's dead-letter-exchange).
-- Events consumed (routing key = event type). This is **what core actually publishes** — its `lib/events/events.ts` emits one coarse event per entity type, payload `{ id, occurredAt }`:
-  - `core.product.invalidated` → delete `core:product:*:<id>` (the event names no branch, so the product goes from every branch that cached it).
-  - `core.branch.invalidated` → delete `core:branch:<id>`.
-  - `core.restaurant.invalidated` → delete `core:branch:*` (the restaurant's trading status reaches us only inside the branch projection) + the suspended flag.
+- Events consumed (routing key = event type). This is **what core actually publishes** — its `lib/events/events.ts` emits one coarse event per entity type:
+  - `core.product.invalidated` → patch `core:product:<branchId>:<id>` with the new `stock` / `unitPriceMinor` / `isAvailable` when the payload carries `branchId`; otherwise delete `core:product:*:<id>` (the event names no branch, so the product goes from every branch that cached it).
+  - `core.branch.invalidated` → patch `core:branch:<id>` with the new trading flags and re-derive the reject-new-orders flag; delete the projection when the payload carries no flags.
+  - `core.restaurant.invalidated` → delete `core:branch:*` (the restaurant's trading status reaches us only inside the branch projection) + the suspended flag. Nothing to patch: the event doesn't carry the status.
   - `core.address.invalidated`, `core.user.invalidated` → registered no-ops; neither is cached.
-- **Do not** write handlers or bindings for `product.stock.changed`, `product.price.changed`, `branch.deactivated`, `restaurant.suspended` or `rbac.permissions_changed`. Earlier drafts of this file and `docs/implementation-plan.md` specified them, but core emits none of them, and `product.#`-style bindings match none of its routing keys — a service configured that way consumes nothing at all. Two things follow:
-  - The reject-new-orders flag and the pending-order-review flag are not event-driven. Deleting the branch projection is enough for correctness: the next placement re-reads from core and sees `acceptOrders: false` or a non-active restaurant status. The flag check stays in `order.service` so it starts working if core ever emits those events.
+
+- **Do not** write handlers or bindings for `product.stock.changed`, `product.price.changed`, `branch.deactivated`, `restaurant.suspended` or `rbac.permissions_changed`. Earlier drafts of this file and `docs/implementation-plan.md` specified them, but core emits none of them, and `product.#`-style bindings match none of its routing keys — a service configured that way consumes nothing at all. What follows from that:
+  - The reject-new-orders flag **is** event-driven, but off the enriched `core.branch.invalidated` payload rather than a distinct `branch.deactivated` event — see "Payload contract" below. A branch core has just closed therefore stops taking orders on the strength of the event itself, not when a TTL lapses.
+  - The pending-order-review flag is **not**: nothing core publishes carries a restaurant's new status. Deleting the branch projection is enough for correctness — the next placement re-reads from core and sees a non-active restaurant status — it just costs one upstream call instead of a Redis hit.
   - The RBAC permission projection expires on its TTL alone.
   See `docs/implementation-plan.md` Phase 1 → "Deviations as built".
 - Delivery semantics: **at-least-once**. Manual ack after the handler commits. Duplicates are expected.
-- Dedupe via Redis SETNX on `core-events:dedupe:<eventId>` (24h TTL): set-if-absent before dispatching the handler; if not fresh, ack and skip. Safe to expire because every handler is an idempotent cache invalidation.
+- Dedupe via Redis SETNX on `core-events:dedupe:<eventId>` (24h TTL): set-if-absent before dispatching the handler; if not fresh, ack and skip. Safe to expire because every handler is idempotent — a patch applies the same committed values twice, a delete deletes nothing the second time.
 - Authentication: AMQP credentials (per-service vhost user/pass from env). No HMAC on the wire — the broker is trusted.
 - There is **no** outbound `events_outbox` in this service. If a future consumer requires it, add both the table and a dispatcher then.
+
+### Payload contract: patch, don't drop
+
+The payload floor is `{ id, occurredAt }`. On top of that, core sends the values
+its writing transaction actually committed where it has them — the branch's
+`isActive`/`acceptOrders`, a branch product's `branchId`/`stock`/`unitPriceMinor`/
+`isAvailable` (its `buildBranchInvalidationPayload` / `buildProductInvalidationPayload`).
+**Prefer correcting the projection in place over deleting it** whenever the
+payload carries every field needed. Stock moves on every order placed anywhere,
+so a delete-only handler flushes the product projection on exactly the event
+that fires most; patching keeps the cache warm instead.
+
+Three rules, all enforced in `lib/core-client/projection.service.ts`:
+
+1. **A patch never creates a projection.** Merge into what is cached; if
+   nothing is cached there is nothing to correct, and inventing a partial
+   projection would serve fields core never sent.
+2. **Only patch fields the event carries, and never coerce them.** Core strips
+   undefined fields before persisting the payload, so a field's presence means
+   core wrote that value. `Boolean("false")` is `true` — a coerced flag would
+   cache a closed branch as open. A non-boolean flag falls back to a delete.
+3. **Absent means unknown, not false.** A payload that mentions neither flag
+   leaves the derived flags alone rather than guessing a branch back open.
+
+Every path stays idempotent, which is what keeps at-least-once delivery and the
+24h dedupe window safe.
+
+### Handler structure
+
+Handlers are **thin wrappers, exactly like controllers** (§10): parse the
+payload into typed values, call one service method, nothing else. One file per
+entity under `lib/core-events/handlers/`, payload parsing in
+`handlers/payload.ts`, registration in `handlers/index.ts`, the registry in
+`registry.ts`, and the transport (topology, dedupe, dispatch, ack/nack) in
+`consumer.ts`.
+
+Everything a handler *does* belongs in a service — today that is
+`CoreProjectionService`, because every inbound event is a cache correction.
+That is a property of this milestone, not of the design: a handler that needs a
+database write, a second upstream call or a WebSocket broadcast delegates to
+whichever service owns that domain (resolved from the DI container inside the
+handler body, so registration never depends on boot order), and only
+`handlers/index.ts` changes. Do **not** let a handler grow a body.
 
 ### Reliability requirement on `core-service`
 
 Core must use a **transactional outbox** on its side: domain mutation and an outbox row are written in the same DB trx; a core-side dispatcher drains the outbox to RabbitMQ with publisher confirms. Publishing directly in the request path without an outbox can lose events on crash and is not acceptable.
+
+### Payments (Kashier v3)
+
+The provider lives behind `IPaymentProvider` in `pkg/payments/`. Nothing in
+`app/payment/` names Kashier except the provider registration in
+`container.ts`: a second acquirer is a second adapter, not a second service.
+
+Four things about this integration are not guessable and have bitten earlier
+drafts of this file:
+
+- **There is no webhook secret.** The HMAC is keyed with the **Payment API
+  Key** — the same credential that goes in the `api-key` header on session
+  creation. `KASHIER_WEBHOOK_SECRET` does not exist. Neither does
+  `KASHIER_FAIL_URL`: v3 has a boolean `failureRedirect`, and we send `false`.
+- **The signature covers a projection, not the bytes.** `data.signatureKeys`
+  names the signed fields; they are sorted, rendered `key=urlencode(value)`,
+  joined with `&`, HMAC-SHA256'd. So `express.json()` is enough — there is no
+  raw-body middleware to add — and **every field outside that list is
+  unauthenticated**. Pinned to Kashier's published vector in
+  `play/test-kashier-signature.ts`; change `kashier.signature.ts` and run it.
+- **A webhook carries no session id and no region.** It names the payment by
+  the `order` reference we chose, echoed back as the signed `merchantOrderId`.
+  Hence `<region>_<publicId>_<attempt>`: the region because we must pick a
+  shard before reading anything and `metaData` is unsigned, the public id
+  because its UUIDv7 timestamp prunes the partition scan, the attempt because
+  Kashier refuses to reuse a reference (`ERR_ORD_02`).
+- **`event` is the operation, never the outcome.** A declined card arrives as
+  `pay` with `data.status = "FAILURE"`. Branch on `data.status`.
+
+Rules for anything that touches money here:
+
+1. **Refuse, don't retry, when a retry cannot help.** The webhook answers 200
+   with an empty body and a stamped `process_error` for a duplicate, an
+   unrecognised reference, or an amount that doesn't match the session; it
+   throws (500) only for genuine processing failures. A non-2xx buys the same
+   event ten more times over a day.
+2. **Every inbound event leaves a row** in `payment_webhook_events`, written
+   before the money work and stamped `processed_at` or `process_error` after
+   — on a separate connection when the transaction rolled back.
+3. **The ledger's unique `idempotency_key` is the real guard.** Write through
+   `createTransactionIfNew` (`ON CONFLICT DO NOTHING`), never a try/catch: a
+   constraint violation inside a transaction aborts every statement after it.
+4. **Never hold a transaction across a provider call.** The refund row is
+   written `pending` first, outside any transaction, and the webhook settles
+   it. A timeout leaves it `pending`, which is the truth.
+5. **An online order holds reserved stock.** `lib/jobs/payment-expiry.ts` is
+   what gives it back when nobody pays; anything that leaves an order in
+   `pending_payment` must be reachable by that sweep.
 
 ### WebSocket
 
