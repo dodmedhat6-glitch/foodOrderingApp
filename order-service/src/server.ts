@@ -6,8 +6,9 @@ import {logger} from "./lib/logger/logger";
 import {destroyAll, pingAll} from "./lib/knex/knex";
 import {messageBroker} from "./lib/messaging/init";
 import {startCoreEventsConsumer} from "./lib/core-events/consumer";
-import {registerCoreEventHandlers} from "./lib/core-events/handlers";
+import {registerCoreEventHandlers} from "./lib/core-events/handlers/index";
 import {startPartitionMaintenance} from "./lib/jobs/partition-maintenance";
+import {startPaymentExpirySweep} from "./lib/jobs/payment-expiry";
 import {attachWsServer} from "./lib/websocket/ws-server";
 import {container} from "./lib/di/container";
 import {TOKENS} from "./lib/di/tokens";
@@ -41,6 +42,11 @@ server.listen(env.port, async () => {
     // months so a write never lands in the DEFAULT partition. Runs now and
     // daily after. Must be after the shard ping, since it talks to every shard.
     startPartitionMaintenance();
+
+    // Closes checkout sessions nobody paid and hands their reserved stock
+    // back to core. Must run after the shard ping for the same reason: it
+    // touches every shard.
+    startPaymentExpirySweep();
 
     messageBroker
         .connect()

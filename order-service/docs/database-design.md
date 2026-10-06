@@ -210,7 +210,10 @@ CREATE TABLE payment_sessions (
     region          TEXT NOT NULL,
     order_id        BIGINT NOT NULL,
     provider_id     INT NOT NULL,                                 -- FK to payment_providers (logically — providers replicated)
+    order_public_id UUID NOT NULL,                                -- added: UUIDv7, prunes the partition scan on settle
+    merchant_order_ref TEXT NOT NULL,                             -- added: '<region>_<publicId>_<attempt>'; the webhook's only handle
     provider_session_id TEXT NOT NULL,                            -- Kashier's session id
+    provider_order_id TEXT NULL,                                  -- added: Kashier's order id, learned from the first webhook; the refund endpoint is keyed by it
     redirect_url    TEXT NOT NULL,
     amount          INT NOT NULL,                                 -- minor units
     currency        TEXT NOT NULL,
@@ -222,15 +225,27 @@ CREATE TABLE payment_sessions (
     created_at      TIMESTAMP NOT NULL DEFAULT NOW(),
     updated_at      TIMESTAMP NOT NULL DEFAULT NOW(),
 
-    CONSTRAINT fk_payment_sessions_order_id FOREIGN KEY (order_id) REFERENCES orders(id),
-    CONSTRAINT uq_payment_sessions_provider_session_id UNIQUE (provider_session_id)
+    -- NO FK to orders: it is RANGE-partitioned, and a FK into a partitioned
+    -- table needs a unique index containing the partition key. Logical
+    -- reference only, same as order_items.
+    CONSTRAINT uq_payment_sessions_provider_session_id UNIQUE (provider_session_id),
+    CONSTRAINT uq_payment_sessions_merchant_order_ref UNIQUE (merchant_order_ref)
 );
 
--- supports webhook lookup by Kashier session id
-CREATE INDEX idx_payment_sessions_provider_session_id ON payment_sessions (provider_session_id);
--- supports order -> session lookup
+-- supports order -> session lookup (init re-use, refund, order detail)
 CREATE INDEX idx_payment_sessions_order_id ON payment_sessions (order_id);
+-- supports the expiry sweep
+CREATE INDEX idx_payment_sessions_status_expires_at ON payment_sessions (status, expires_at)
+    WHERE status IN ('initialized','pending','authorized');
+-- (no index on provider_session_id or merchant_order_ref: the unique
+--  constraints above already provide one each)
 ```
+
+> **As built.** `expires_at TIMESTAMP NOT NULL` was added as well — it is what
+> `POST /payments/init` returns and what the sweep scans. The webhook does
+> *not* look a session up by `provider_session_id`: Kashier's payload carries
+> no session id, only the `merchantOrderId` we chose. See
+> `docs/business-logic/payments.md` §2, "The merchant order reference".
 
 ---
 
@@ -243,6 +258,7 @@ CREATE TABLE transactions (
     id                  BIGSERIAL PRIMARY KEY,
     region              TEXT NOT NULL,
     order_id            BIGINT NULL,                              -- nullable for payouts not tied to an order
+    order_public_id     UUID NULL,                                -- added: UUIDv7, so GET /payments/{id} can reach the order in one partition
     transaction_type    TEXT NOT NULL CHECK (transaction_type IN (
                             'charge','refund','commission','payout','cod_collection','adjustment'
                         )),
@@ -263,7 +279,8 @@ CREATE TABLE transactions (
     created_at          TIMESTAMP NOT NULL DEFAULT NOW(),
     updated_at          TIMESTAMP NOT NULL DEFAULT NOW(),
 
-    CONSTRAINT fk_transactions_order_id FOREIGN KEY (order_id) REFERENCES orders(id),
+    -- NO FK to orders, for the same partitioning reason as payment_sessions.
+    -- The self-reference below IS a real FK: transactions is not partitioned.
     CONSTRAINT fk_transactions_refunded_payment_id FOREIGN KEY (refunded_payment_id) REFERENCES transactions(id),
     CONSTRAINT uq_transactions_idempotency_key UNIQUE (idempotency_key)
 );
@@ -279,7 +296,15 @@ CREATE INDEX idx_transactions_provider_reference_id ON transactions (provider_re
 CREATE INDEX idx_transactions_dst_acc_type_created_at ON transactions (dst_acc_id, transaction_type, created_at DESC) WHERE transaction_type = 'payout';
 -- supports finance reconciliation by status + type
 CREATE INDEX idx_transactions_type_status_created_at ON transactions (transaction_type, status, created_at DESC);
+-- supports the self-FK above, and the refund-headroom sum per charge
+CREATE INDEX idx_transactions_refunded_payment_id ON transactions (refunded_payment_id)
+    WHERE refunded_payment_id IS NOT NULL;
 ```
+
+> **As built.** `refunded_payment_id` is set on the **refund** row and points at
+> the charge, which is what lets one charge carry several partial refunds.
+> `is_refunded` is flagged on the charge only once those refunds reach its full
+> amount — the remaining headroom is the sum, not the flag.
 
 Why no separate `payouts` table:
 - Same columns are needed (amount, currency, src/dst, provider ref, status, timestamps).
@@ -447,7 +472,8 @@ CREATE TABLE payment_webhook_events (
     id              BIGSERIAL PRIMARY KEY,
     region          TEXT NOT NULL,
     provider_id     INT NOT NULL,
-    provider_event_id TEXT NOT NULL,                              -- de-dup key from provider
+    provider_event_id TEXT NOT NULL,                              -- de-dup key: '<transactionId>:<status>' for Kashier
+    event_type      TEXT NOT NULL,                                -- added: the provider's own event name ('pay', 'refund', ...)
     signature       TEXT NOT NULL,
     payload         JSONB NOT NULL,
     received_at     TIMESTAMP NOT NULL DEFAULT NOW(),
@@ -460,10 +486,17 @@ CREATE TABLE payment_webhook_events (
 -- supports replay/audit by order via session lookup; no additional index needed beyond the unique.
 ```
 
+```sql
+-- supports the operator sweep for events that arrived and never settled
+CREATE INDEX idx_payment_webhook_events_received_at ON payment_webhook_events (received_at)
+    WHERE processed_at IS NULL;
+```
+
 Webhook handler:
-1. Verify signature.
-2. Try `INSERT ... ON CONFLICT DO NOTHING`. If conflict → already processed (or in flight), return 200 immediately.
-3. Otherwise, in a transaction: parse payload, advance order/session/transaction state, set `processed_at`. (No outbox event — see §0 — the WebSocket fan-out is enough for clients.)
+1. Verify signature (HMAC over the `signatureKeys` projection, keyed with the Payment API Key).
+2. Try `INSERT ... ON CONFLICT DO NOTHING`, on its own connection, so the arrival record survives a processing failure. A conflict means "seen before" — but only a row with `processed_at` set is a true duplicate; one with `processed_at IS NULL` failed and the provider's retry is let through.
+3. Otherwise, in a transaction: parse payload, advance session/ledger/order state, set `processed_at`. (No outbox event — see §0 — the WebSocket fan-out is enough for clients.)
+4. On failure: roll back, stamp `process_error` on a separate connection, rethrow.
 
 ---
 
@@ -518,10 +551,14 @@ core.products      ← order_items.product_id
 | `orders`               | `idx_orders_status_created_at` (partial)           | Auto-assignment scan for ready orders               |
 | `orders`               | `idx_orders_delivery_agent_id_status` (partial)    | `GET /agents/tasks?status=`                         |
 | `order_items`          | `idx_order_items_order_id`                         | Item batch fetch                                    |
-| `payment_sessions`     | `idx_payment_sessions_provider_session_id`         | Webhook lookup                                      |
-| `payment_sessions`     | `idx_payment_sessions_order_id`                    | Order detail                                        |
+| `payment_sessions`     | `uq_payment_sessions_merchant_order_ref`           | Webhook lookup (the only handle a webhook gives)    |
+| `payment_sessions`     | `idx_payment_sessions_order_id`                    | Init re-use, refund, order detail                   |
+| `payment_sessions`     | `idx_payment_sessions_status_expires_at` (partial) | Expiry sweep                                        |
 | `transactions`         | `idx_transactions_order_id`                        | Order ledger expansion                              |
-| `transactions`         | `idx_transactions_provider_reference_id` (partial) | Webhook de-dup at txn level                         |
+| `transactions`         | `idx_transactions_provider_reference_id` (partial) | Refund settlement by provider reference             |
+| `transactions`         | `idx_transactions_refunded_payment_id` (partial)   | Refund headroom per charge; supports the self-FK    |
+| `payment_webhook_events` | `uq_payment_webhook_events_provider_event_id`    | Webhook de-dup                                      |
+| `payment_webhook_events` | `idx_payment_webhook_events_received_at` (partial) | Operator sweep for unsettled events               |
 | `transactions`         | `idx_transactions_dst_acc_type_created_at` (partial) | `GET /restaurant/payouts?from&to`                |
 | `transactions`         | `idx_transactions_type_status_created_at`          | Admin reconciliation                                |
 | `deliveries`           | `idx_deliveries_agent_id_status_assigned_at`       | Agent task list                                     |

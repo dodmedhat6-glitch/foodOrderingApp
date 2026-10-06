@@ -273,21 +273,35 @@ class InitPaymentRequestDTO {
 
 ```ts
 class PaymentInitResponseDTO {
-  sessionId: string;            // our payment_sessions.id
-  providerSessionId: string;    // Kashier's
-  redirectUrl: string;
-  expiresAt: string;
-  amount: number;
+  sessionId: number;            // our payment_sessions.id
+  providerSessionId: string;    // Kashier's session _id
+  redirectUrl: string;          // send the customer here
+  expiresAt: string;            // ISO 8601 UTC
+  amount: number;               // minor units
   currency: string;
+  status: 'initialized' | 'pending' | 'authorized';
 }
 ```
+
+Idempotent at the domain level as well as through `Idempotency-Key`: an order
+that already has a payable session gets **that session** back rather than a
+second one.
+
+`POST /api/orders` with `paymentMethod: "online"` already returns
+`payment: { sessionId, redirectUrl }` (`sessionId` there is the *provider's*
+session id), so this endpoint is the recovery path rather than the normal one.
 
 **Errors**
 
 | Status | Body                                          |
 | ------ | --------------------------------------------- |
-| 404    | `{ "error": "OrderNotFound" }`                |
+| 400    | `{ "error": "Missing Idempotency-Key header" }` |
+| 403    | `{ "error": "Permission denied" }` — caller is not a customer |
+| 404    | `{ "error": "OrderNotFound" }` — unknown, or not the caller's order |
 | 409    | `{ "error": "OrderNotPendingPayment" }`       |
+| 409    | `{ "error": "OrderNotOnlinePayment" }` — the order is COD |
+| 409    | `{ "error": "IdempotencyConflict" }` — same key, different body |
+| 502    | `{ "error": "PaymentProviderRejected", "provider": "kashier", "providerStatus": 400, "providerMessage": "..." }` |
 | 503    | `{ "error": "Payment provider unavailable" }` |
 
 ---
@@ -296,18 +310,26 @@ class PaymentInitResponseDTO {
 
 **Path**: `provider` ∈ `{ "kashier" }`.
 
-**Headers**: provider-specific signature header (Kashier sends in `x-kashier-signature` or similar — verified in code).
+**Auth**: none. The HMAC in `x-kashier-signature` is the authentication, verified
+against the **Payment API Key** (Kashier has no separate webhook secret). The
+region is not a header either — it travels inside the signed `merchantOrderId`.
 
-**Body**: provider-defined raw payload, kept as-is in `payment_webhook_events.payload`.
+**Body**: the provider's raw payload, kept as-is in
+`payment_webhook_events.payload`.
 
-**Response**: always **200** (we ack on duplicates; only return non-200 if signature is bad or DB write throws).
+**Response**: **200 with an empty body** for everything the provider cannot fix
+by resending — success, a duplicate, an unrecognised reference, an amount that
+does not match the session. The body is empty on purpose: Kashier discards it,
+and reporting internal state to an unauthenticated caller would tell a prober
+which references exist.
 
 **Errors**
 
 | Status | Body                                  |
 | ------ | ------------------------------------- |
 | 401    | `{ "error": "InvalidSignature" }`     |
-| 500    | (rare) — Kashier will retry           |
+| 404    | `{ "error": "UnknownPaymentProvider" }` — `{provider}` is not `kashier` |
+| 500    | a genuine processing failure — Kashier retries, which is the intent |
 
 ---
 
@@ -320,20 +342,32 @@ class PaymentInitResponseDTO {
 ```ts
 class PaymentResponseDTO {
   id: number;
-  orderPublicId: string;
+  orderId: string | null;       // the order's public UUID; null for a payout
   type: 'charge' | 'refund' | 'commission' | 'cod_collection' | 'payout' | 'adjustment';
   method: 'online' | 'cod' | 'bank_transfer' | 'system';
-  provider?: 'kashier';
-  providerReferenceId?: string;
+  provider: 'kashier' | 'cod' | null;
+  providerReferenceId: string | null;
   status: 'pending' | 'succeeded' | 'failed' | 'reversed';
-  amount: number;
+  amount: number;               // minor units
   currency: string;
-  isRefunded: boolean;
-  refundedPaymentId?: number;
+  isRefunded: boolean;          // true only once refunds reach the full amount
+  refundedPaymentId: number | null;  // on a refund row: the charge it repays
   createdAt: string;
   updatedAt: string;
 }
 ```
+
+`provider` is the name, never the internal numeric id. `providerReferenceId` is
+included deliberately — it is what a support agent quotes to Kashier, and the
+customer already sees it on their statement.
+
+**Errors**
+
+| Status | Body                              |
+| ------ | --------------------------------- |
+| 400    | `{ "error": "Invalid payment id" }` |
+| 403    | `{ "error": "Permission denied" }` — no `payments:read` (e.g. a customer) |
+| 404    | `{ "error": "PaymentNotFound" }` — unknown, or another restaurant's |
 
 ---
 
@@ -358,8 +392,30 @@ class RefundRequestDTO {
 **Response 202** (accepted; final state via webhook):
 
 ```ts
-{ "refundId": number, "status": "pending", "amount": number, "currency": string }
+class RefundAcceptedResponseDTO {
+  refundId: number;
+  status: 'pending' | 'succeeded';   // 'succeeded' only for COD, which moves no money
+  amount: number;                    // minor units
+  currency: string;
+}
 ```
+
+202 and not 200: Kashier accepting a refund is not the money having moved. The
+row stays `pending` until its webhook arrives. Omitting `amount` refunds the
+full **remaining** amount, which is less than the charge once a partial refund
+has gone through.
+
+**Errors**
+
+| Status | Body                                      |
+| ------ | ----------------------------------------- |
+| 400    | `{ "error": "Missing Idempotency-Key header" }` |
+| 403    | `{ "error": "Permission denied" }` — not a system admin |
+| 404    | `{ "error": "PaymentNotFound" }`          |
+| 409    | `{ "error": "NotARefundableCharge" }` — not a succeeded charge, or no captured session to address the refund to |
+| 409    | `{ "error": "RefundExceedsCharge" }`      |
+| 502    | `{ "error": "RefundRejected" }` / `{ "error": "PaymentProviderRejected", ... }` |
+| 503    | `{ "error": "Payment provider unavailable" }` — the refund row is left `pending` |
 
 ---
 

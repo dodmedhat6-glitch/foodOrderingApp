@@ -1,4 +1,4 @@
-import {inject, injectable} from "tsyringe";
+import {container, inject, injectable} from "tsyringe";
 import {Knex} from "knex";
 import {AppError} from "../../../lib/error/AppError";
 import {ICacheProvider} from "../../../pkg/cache/cache.interface";
@@ -9,11 +9,11 @@ import {db} from "../../../lib/knex/knex";
 import {isRegion} from "../../../lib/sharding/regions";
 import {newPublicId, timestampFromUuidV7} from "../../../pkg/utils/uuid";
 import {toMs} from "../../../pkg/utils/time";
-import {getBranch, reserveStock} from "../../../lib/core-client/branch.client";
+import {getBranch, releaseStock, reserveStock} from "../../../lib/core-client/branch.client";
 import {getBranchProducts} from "../../../lib/core-client/product.client";
 import {getCustomerAddress} from "../../../lib/core-client/address.client";
 import {branchRejectingOrdersKey} from "../../../lib/core-client/cache-keys";
-import {CoreCallContext} from "../../../lib/core-client/types";
+import {CoreCallContext, ReserveStockItem} from "../../../lib/core-client/types";
 import {wsChannels, wsPublish} from "../../../lib/websocket/publisher";
 import {
     buildPaginationResultBy,
@@ -47,15 +47,20 @@ import {
     findItemsByOrderIds,
 } from "../repository/order-item.repo";
 import {CreateOrderItemInput, ListOrdersFilters, PricedOrderLine} from "../types";
+import {SERVICE_FEE_MINOR} from "../constants";
 import {CreateOrderRequestDTO} from "../dto/order.request.dto";
 import {
     OrderDetailResponseDTO,
-    OrderPaymentSummaryDTO,
     OrderResponseDTO,
     OrderStatusResponseDTO,
     OrderSummaryResponseDTO,
+    PaymentHandoffDTO,
 } from "../dto/order.response.dto";
 import {OrderStatusService} from "./order-status.service";
+// Type-only: the payment module imports this one, and a value import here
+// would close the cycle at require() time. The instance is resolved from the
+// container at call time instead (see `payments`).
+import type {PaymentService} from "../../payment/service/payment.service";
 
 /** The authenticated caller, as resolved from the JWT by the controller. */
 export interface OrderRequester {
@@ -76,6 +81,9 @@ export interface PlaceOrderContext extends CoreCallContext {
 // partition probe while making a month-boundary straddle impossible.
 const PUBLIC_ID_WINDOW_MS = toMs(1, "m");
 
+/** `status_reason` on an order the payment-expiry sweep cancels. */
+const PAYMENT_EXPIRED_REASON = "payment_session_expired";
+
 @injectable()
 export class OrderService {
     constructor(
@@ -88,11 +96,31 @@ export class OrderService {
      *
      * Validation reads core through the cached clients, money is computed in
      * minor units, and the header plus its lines are written in one
-     * transaction. Stock is reserved in core *after* that commit, on purpose:
-     * core's decrement is a separate database that cannot join our
-     * transaction, and holding our rows locked across an HTTP round trip is
-     * what would actually hurt at this service's write rate. The window is
-     * seconds wide and a failure compensates by cancelling the order.
+     * transaction.
+     *
+     * Stock is reserved in core *before* that transaction opens. Core's
+     * decrement is a separate database that cannot join our transaction, so
+     * one of the two has to go first and the loser needs a compensation:
+     *
+     *  - Reserve first (this): a failure to write the order leaves units held
+     *    that nobody owns, and we hand them back with `releaseStock`. The
+     *    customer sees either a placed order or an error — never a placed
+     *    order the kitchen cannot fill.
+     *  - Commit first: a failed reserve leaves a *placed* order with no stock
+     *    behind it, which can only be compensated by cancelling an order the
+     *    customer has already been told about, and which the restaurant may
+     *    have already seen on its dashboard.
+     *
+     * The second failure is worse, and it is also the likelier one — losing a
+     * race for the last unit is ordinary, whereas failing our own single-shard
+     * insert is not. Reserving first also costs nothing in lock time: the HTTP
+     * round trip happens before our transaction opens rather than inside it.
+     *
+     * The compensation is not transactional, so it must run at most once per
+     * reserve (core has no reservations ledger to match it against). Strict
+     * idempotency on this endpoint is what guarantees that — a replayed
+     * `POST /orders` is answered from the recorded response and never reaches
+     * this method.
      */
     placeOrder = async (
         input: CreateOrderRequestDTO,
@@ -126,7 +154,7 @@ export class OrderService {
 
         const subtotal = lines.reduce((sum, line) => sum + line.lineTotal, 0);
         const deliveryFee = branch.deliveryFeeMinor;
-        const serviceFee = Math.floor((subtotal * env.orders.serviceFeeBps) / 10_000);
+        const serviceFee = SERVICE_FEE_MINOR;
         const total = subtotal + deliveryFee + serviceFee;
 
         const isOnline = input.paymentMethod === PaymentMethod.ONLINE;
@@ -137,58 +165,111 @@ export class OrderService {
         // placed until Kashier confirms the capture (Phase 2).
         const status = isOnline ? OrderStatus.PENDING_PAYMENT : OrderStatus.PLACED;
 
-        const trx = await conn.transaction();
+        // Held before anything is written, so the order rows below are only
+        // ever created for units we already own.
+        const reserved = [...lineByProduct].map(([productId, quantity]) => ({productId, quantity}));
+        await this.reserveStockOrFail(branch.id, reserved, ctx);
+
         let order: OrderEntity;
         let items: OrderItemEntity[];
         try {
-            order = await createOrder(
-                {
-                    region,
-                    publicId,
-                    countryCode: branch.countryCode,
-                    restaurantId: branch.restaurantId,
-                    branchId: branch.id,
-                    customerId: requester.userId,
-                    customerAddressId: address.id,
-                    deliveryLat: address.lat,
-                    deliveryLng: address.lng,
-                    deliveryAddressTextSnapshot: address.addressText,
-                    branchNameSnapshot: branch.name,
-                    restaurantNameSnapshot: branch.restaurantName,
-                    status,
-                    subtotal,
-                    deliveryFee,
-                    serviceFee,
-                    total,
-                    currency: branch.currency,
-                    paymentMethod: input.paymentMethod,
-                    placedAt: isOnline ? null : new Date(),
-                },
-                trx,
-            );
+            const trx = await conn.transaction();
+            try {
+                order = await createOrder(
+                    {
+                        region,
+                        publicId,
+                        countryCode: branch.countryCode,
+                        restaurantId: branch.restaurantId,
+                        branchId: branch.id,
+                        customerId: requester.userId,
+                        customerAddressId: address.id,
+                        deliveryLat: address.lat,
+                        deliveryLng: address.lng,
+                        deliveryAddressTextSnapshot: address.addressText,
+                        branchNameSnapshot: branch.name,
+                        restaurantNameSnapshot: branch.restaurantName,
+                        status,
+                        subtotal,
+                        deliveryFee,
+                        serviceFee,
+                        total,
+                        currency: branch.currency,
+                        paymentMethod: input.paymentMethod,
+                        placedAt: isOnline ? null : new Date(),
+                    },
+                    trx,
+                );
 
-            items = await bulkInsertItems(order.id, lines.map(toItemInput(region)), trx);
+                items = await bulkInsertItems(order.id, lines.map(toItemInput(region)), trx);
 
-            await trx.commit();
+                await trx.commit();
+            } catch (err) {
+                await trx.rollback();
+                throw err;
+            }
         } catch (err) {
-            await trx.rollback();
+            // The units are held and no order claims them. Hand them back
+            // before surfacing the failure — the customer's retry will reserve
+            // them again, and nothing else will ever come looking for them.
+            //
+            // The outer try also covers `conn.transaction()` itself, which is
+            // where a shard that has gone away fails: that is exactly the case
+            // where units would otherwise leak until a stock audit.
+            await this.releaseReservedStock(branch.id, reserved, ctx);
             throw err;
         }
 
-        await this.reserveStockOrVoid(order, lineByProduct, conn, ctx);
-
         // Online orders stay invisible to the kitchen until payment lands.
         if (!isOnline) {
-            wsPublish(
-                [wsChannels.branch(order.branchId), wsChannels.restaurant(order.restaurantId)],
-                OrderWsEvent.CREATED,
-                OrderSummaryResponseDTO.from(order, items.length),
-            );
+            this.publishCreated(order, items.length);
             await this.invalidateBranchOrderLists(order.branchId);
+            return OrderResponseDTO.from(order, items);
         }
 
-        return OrderResponseDTO.from(order, items);
+        return OrderResponseDTO.from(order, items, await this.openPaymentSession(order, ctx));
     };
+
+    /**
+     * Opens the checkout session for an online order and hands the client the
+     * redirect, so placing and paying is one round trip.
+     *
+     * Best-effort by design. The order is already committed and its stock is
+     * already held; failing the whole placement because the acquirer was slow
+     * would throw away work the customer has done and leave us compensating
+     * a transaction that actually succeeded. A null `payment` block means
+     * exactly one thing to the client — call `POST /api/payments/init` — and
+     * if nobody ever does, the expiry sweep gives the stock back.
+     *
+     * The payment service is resolved from the container here rather than
+     * injected, because it injects *this* service: the webhook settles an
+     * order and the sweep cancels one, so the dependency genuinely runs both
+     * ways. Resolving the back-edge at call time is what keeps that from
+     * being a constructor cycle, and it is the same pattern the core-event
+     * handlers use (CLAUDE.md s8/Handler structure).
+     */
+    private openPaymentSession = async (
+        order: OrderEntity,
+        ctx: PlaceOrderContext,
+    ): Promise<PaymentHandoffDTO | undefined> => {
+        try {
+            const session = await this.payments().openSessionFor(order, {
+                region: ctx.region,
+                correlationId: ctx.correlationId,
+            });
+            return {sessionId: session.providerSessionId, redirectUrl: session.redirectUrl};
+        } catch (err) {
+            logger.error("order placed but payment session could not be opened", {
+                orderPublicId: order.publicId,
+                correlationId: ctx.correlationId,
+                error: (err as Error).message,
+            });
+            return undefined;
+        }
+    };
+
+    private payments = (): PaymentService =>
+        container.resolve<PaymentService>(TOKENS.PaymentService);
 
     /** GET /api/orders/{publicId} — header, lines, payment summary, timeline. */
     getOrder = async (
@@ -203,7 +284,25 @@ export class OrderService {
         this.assertCanReadOrder(order, requester);
 
         const items = await findItemsByOrderIds([order.id], conn);
-        return OrderDetailResponseDTO.fromDetail(order, items, this.paymentSummary(order));
+        const paymentSummary = await this.payments().summarizeForOrder(order, conn);
+        return OrderDetailResponseDTO.fromDetail(order, items, paymentSummary);
+    };
+
+    /**
+     * The order behind a public id, with no authorisation check — for callers
+     * that have already established their own right to it, or that have no
+     * HTTP caller at all (the payment webhook, the expiry sweep). Takes the
+     * connection so it can join a transaction the caller owns.
+     *
+     * Name is caller-agnostic on purpose (CLAUDE.md s8): a `findByPublicId`
+     * is a `findByPublicId` whoever asks. The authorisation lives in
+     * `getOrder` and in `assertCanRead`, which callers that need it invoke
+     * explicitly rather than getting silently.
+     */
+    findByPublicId = async (publicId: string, conn: Knex): Promise<OrderEntity> => {
+        const order = await findOrderByPublicId(publicId, conn, publicIdWindow(publicId));
+        if (!order) throw OrderNotFoundError;
+        return order;
     };
 
     /**
@@ -288,6 +387,110 @@ export class OrderService {
     };
 
     /**
+     * A transition no human requested: the payment webhook placing an order
+     * once the capture lands, the expiry sweep cancelling one that was never
+     * paid, the assignment service moving one to `assigned` (Phase 3).
+     *
+     * Takes the caller's transaction, because the point of a system
+     * transition is that it commits with whatever made it true — an order
+     * that is `placed` with no charge row, or a charge row against an order
+     * still waiting for payment, are both states nobody should be able to
+     * observe.
+     *
+     * Still goes through the status machine with `OrderActor.SYSTEM`: being
+     * the system is permission to traverse the system's edges, not licence to
+     * invent one.
+     */
+    transitionBySystem = async (
+        order: OrderEntity,
+        target: OrderStatus,
+        conn: Knex,
+        reason?: string,
+    ): Promise<OrderEntity> => {
+        const timestampColumn = this.statusService.assertTransition(
+            order.status,
+            target,
+            OrderActor.SYSTEM,
+        );
+
+        const updated = await updateOrderStatus(
+            order.id,
+            order.createdAt,
+            order.status,
+            {status: target, statusReason: reason ?? null, timestampColumn},
+            conn,
+        );
+        // Zero rows means something else moved the order between the read and
+        // the write. The caller's transaction must not commit on a stale
+        // premise, so this is an error rather than a silent no-op.
+        if (!updated) throw OrderNotFoundError;
+
+        return updated;
+    };
+
+    /**
+     * Cancels an online order whose payment never arrived, and gives the
+     * stock back.
+     *
+     * The stock release is the part that matters. An online order holds units
+     * core decremented before the order row existed, so an abandoned checkout
+     * takes them out of circulation until something returns them — this is
+     * that something. It runs after the cancellation commits, not inside it:
+     * core is a different database and cannot join our transaction, and the
+     * order of the two is chosen the same way placement chooses it, by which
+     * failure is survivable. A cancelled order whose release failed leaks
+     * stock and is logged loudly; a release that happened for an order that
+     * then failed to cancel would hand out units an order still claims.
+     */
+    cancelUnpaidOrder = async (order: OrderEntity, conn: Knex): Promise<OrderEntity> => {
+        const items = await findItemsByOrderIds([order.id], conn);
+        const cancelled = await this.transitionBySystem(
+            order,
+            OrderStatus.CANCELLED,
+            conn,
+            PAYMENT_EXPIRED_REASON,
+        );
+
+        await this.releaseReservedStock(
+            order.branchId,
+            items.map((item) => ({productId: item.productId, quantity: item.quantity})),
+            {},
+        );
+
+        await this.invalidateBranchOrderLists(cancelled.branchId);
+        this.publishStatusChange(cancelled, PAYMENT_EXPIRED_REASON);
+        return cancelled;
+    };
+
+    /**
+     * Announces an order that has just become visible to the restaurant.
+     *
+     * Called by the payment module after a capture commits, and by
+     * `placeOrder` for COD. Deliberately post-commit and deliberately
+     * best-effort: a broadcast is a notification about something that has
+     * already happened, and the transaction it describes is long since
+     * durable.
+     */
+    announcePlacement = async (order: OrderEntity): Promise<void> => {
+        const conn = db(order.region);
+        const [count] = await countItemsByOrderIds([order.id], conn);
+
+        this.publishCreated(order, count?.count ?? 0);
+        this.publishStatusChange(order);
+        await this.invalidateBranchOrderLists(order.branchId);
+    };
+
+    /**
+     * The read rule, for other modules that hold an order and a caller and
+     * need the same answer this module would give — `GET /api/payments/{id}`
+     * authorises against the order behind the ledger row. Exposed rather than
+     * restated there, because two copies of a tenancy check are two chances
+     * to disagree.
+     */
+    assertCanRead = (order: OrderEntity, requester: OrderRequester): void =>
+        this.assertCanReadOrder(order, requester);
+
+    /**
      * Refuses an order when the branch, or the restaurant above it, isn't
      * trading. The Redis flag is checked as well as the projection because
      * `branch.deactivated` arrives as an event and must take effect
@@ -347,54 +550,66 @@ export class OrderService {
     };
 
     /**
-     * Reserves the stock that the committed order claims. Core's decrement is
-     * the authority on who got the last unit; if it refuses, the order we just
-     * wrote can't be fulfilled, so it is cancelled and the customer gets the
-     * 409 they would have got had the race gone the other way.
+     * Holds the units this order needs, before any of it is written.
+     *
+     * Core's locked decrement is the authority on who got the last unit; the
+     * pre-check in `priceLines` against the cached product projection only
+     * exists to fail fast with a good message, and can be stale by
+     * construction. So a 409 here is an ordinary outcome, not an anomaly — and
+     * it is translated back into this module's own contract shape
+     * (docs/api-contracts.md s1.1) rather than surfacing core's envelope
+     * stringified into a message. A customer who loses the race for the last
+     * unit gets the same body as one who never had a chance at it.
      */
-    private reserveStockOrVoid = async (
-        order: OrderEntity,
-        quantityByProduct: Map<number, number>,
-        conn: Knex,
+    private reserveStockOrFail = async (
+        branchId: number,
+        items: ReserveStockItem[],
         ctx: CoreCallContext,
     ): Promise<void> => {
-        const items = [...quantityByProduct].map(([productId, quantity]) => ({productId, quantity}));
-
         try {
-            await reserveStock(order.branchId, items, ctx);
+            await reserveStock(branchId, items, ctx);
         } catch (err) {
-            await updateOrderStatus(
-                order.id,
-                order.createdAt,
-                order.status,
-                {
-                    status: OrderStatus.CANCELLED,
-                    statusReason: "out_of_stock_post_commit",
-                    timestampColumn: "cancelled_at",
-                },
-                conn,
-            ).catch((cancelErr: unknown) => {
-                // The order is now stuck claiming stock it never got. Loud,
-                // because it needs an operator — not a silent catch.
-                logger.error("failed to void order after stock reservation failed", {
-                    orderPublicId: order.publicId,
-                    error: String(cancelErr),
-                });
-            });
-
-            this.publishStatusChange(
-                new OrderEntity({...order, status: OrderStatus.CANCELLED}),
-                "out_of_stock_post_commit",
-            );
-
-            // The customer asked us for an order, not for a report on which
-            // upstream said no. A lost race here is the same answer as losing
-            // it in the pre-check, so it gets the same documented body
-            // (docs/api-contracts.md s1.1) rather than core's envelope
-            // stringified into a message.
             const lines = outOfStockLinesFromCoreError(err);
             if (lines) throw outOfStockError(lines);
             throw err;
+        }
+    };
+
+    /**
+     * Gives back units a reserve is holding for an order that was never
+     * written.
+     *
+     * Deliberately swallows its own failure and logs instead: the caller is
+     * already throwing the error the customer will see, and replacing it with
+     * "the release failed" would tell them nothing they can act on while
+     * hiding why their order didn't happen.
+     *
+     * Both failure branches are logged at `error` because both leak stock —
+     * units marked sold that nobody bought. That is an operator problem, not a
+     * customer one: it shows up as a branch that has quietly stopped selling a
+     * product. `missing` lines are core telling us the product row is gone, so
+     * the units had nowhere to return to.
+     */
+    private releaseReservedStock = async (
+        branchId: number,
+        items: ReserveStockItem[],
+        ctx: CoreCallContext,
+    ): Promise<void> => {
+        try {
+            const result = await releaseStock(branchId, items, ctx);
+            if (result.missing.length > 0) {
+                logger.error("stock release could not return every line", {
+                    branchId,
+                    missing: result.missing,
+                });
+            }
+        } catch (err) {
+            logger.error("failed to release reserved stock after a failed placement", {
+                branchId,
+                items,
+                correlationId: ctx.correlationId,
+                error: (err as Error).message,
+            });
         }
     };
 
@@ -475,29 +690,17 @@ export class OrderService {
     };
 
     /**
-     * Phase 1 approximation. The authoritative payment state lives in
-     * `transactions` / `payment_sessions`, which land in Phase 2; until then
-     * it is derived from the order, which is enough for every state Phase 1
-     * can actually reach.
+     * The `order.created` broadcast — the moment an order becomes visible to
+     * the restaurant. For COD that is placement; for an online order it is
+     * the capture, which is why the payment module calls
+     * `announcePlacement` rather than inlining its own emit.
      */
-    private paymentSummary = (order: OrderEntity): OrderPaymentSummaryDTO => {
-        let status: OrderPaymentSummaryDTO["status"] = "pending";
-        if (order.paymentMethod === PaymentMethod.ONLINE) {
-            if (order.status === OrderStatus.PENDING_PAYMENT) status = "pending";
-            else if (order.status === OrderStatus.CANCELLED || order.status === OrderStatus.REJECTED) {
-                status = "refunded";
-            } else status = "captured";
-        } else if (order.status === OrderStatus.DELIVERED) {
-            status = "captured";
-        }
-
-        return {
-            method: order.paymentMethod,
-            status,
-            amount: order.total,
-            currency: order.currency,
-            refundedAmount: 0,
-        };
+    private publishCreated = (order: OrderEntity, itemsCount: number): void => {
+        wsPublish(
+            [wsChannels.branch(order.branchId), wsChannels.restaurant(order.restaurantId)],
+            OrderWsEvent.CREATED,
+            OrderSummaryResponseDTO.from(order, itemsCount),
+        );
     };
 
     private publishStatusChange = (order: OrderEntity, reason?: string): void => {

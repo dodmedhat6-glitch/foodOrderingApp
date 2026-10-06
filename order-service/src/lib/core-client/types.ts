@@ -77,6 +77,20 @@ export interface ReserveStockResult {
 }
 
 /**
+ * `POST /api/internal/branches/:branchId/release-stock` — core's
+ * `ReleaseStockResponse`.
+ *
+ * `missing` holds lines whose branch product row no longer exists, so the
+ * units could not be returned anywhere. Core reports them rather than failing
+ * the release: the caller is already compensating a failed placement and must
+ * not be handed a second failure. Worth logging — it means stock has leaked.
+ */
+export interface ReleaseStockResult {
+    released: Array<{productId: number; quantity: number; remainingStock: number}>;
+    missing: Array<{productId: number; quantity: number}>;
+}
+
+/**
  * `GET /api/roles/:role/permissions` — core's `memberService.getRolePermissions`.
  *
  * Not under `/api/internal`: core exposes the role catalog on its public rbac
@@ -88,3 +102,27 @@ export interface RolePermissionsLookup {
     role: string;
     permissions: Array<{permission: string}>;
 }
+
+/**
+ * The subset of a branch projection a `core.branch.invalidated` event can
+ * carry, and therefore the only fields `CoreProjectionService` will patch in
+ * place. A field is present only when core's writing transaction committed
+ * that value (its `buildBranchInvalidationPayload`).
+ *
+ * Deliberately narrower than `BranchLookup`: the lookup joins the restaurant,
+ * and a branch event knows nothing about restaurant-level changes.
+ */
+export type BranchProjectionPatch = Partial<Pick<BranchLookup, "isActive" | "acceptOrders">>;
+
+/**
+ * The patchable subset of a product projection, plus the `branchId` that says
+ * *which* projection — the keys are per branch+product, so without it the
+ * event can only be handled as a delete across every branch.
+ *
+ * `name` and `imageUrl` are absent on purpose: they live on core's `products`
+ * table rather than the branch row the event reports on, so core doesn't send
+ * them and a patch must not invent them.
+ */
+export type ProductProjectionPatch = Partial<
+    Pick<ProductLookup, "unitPriceMinor" | "stock" | "isAvailable">
+> & {branchId?: number};
