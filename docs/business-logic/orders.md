@@ -83,21 +83,26 @@ Header: `Idempotency-Key` (required, `idempotency({strict: true})` middleware).
 5. **Compute money**:
    - `subtotal = Σ unitPrice × quantity` (all in minor units).
    - `delivery_fee = branch.deliveryFee` (cached).
-   - `service_fee = floor(subtotal × platform_service_rate)` — config-driven, currently 0.
+   - `service_fee = SERVICE_FEE_MINOR` — a flat platform fee, the same in every region (`app/order/constants.ts`). Not a percentage and not config: it is one number today, and the order row stores the fee it was actually charged, so changing the constant never reprices an existing order.
    - `total = subtotal + delivery_fee + service_fee`.
-6. **In one trx on the branch's region**:
+6. **Reserve the stock** via `core-client.reserveStock(branchId, items)` — **before** the transaction opens, not after it commits. Core's locked decrement is the authority on who got the last unit; the step-4 pre-check is a fast-fail against a projection that can be stale by construction, so a 409 here is ordinary and is returned in the same `OutOfStock` shape.
+7. **In one trx on the branch's region**:
    - Insert `orders` with `status = paymentMethod === 'online' ? 'pending_payment' : 'placed'`.
    - Insert `order_items` (one INSERT … VALUES … with multiple rows).
    - For COD: insert `transactions(type='cod_collection', status='pending', amount=total, src_acc_id=customer, dst_acc_id=restaurantOwner)`.
-   - Decrement product stock via `core-client.reserveStock(branchId, items)` — **out-of-trx**, after commit. If reserve fails, we void the order (status=`cancelled`, reason=`out_of_stock_post_commit`). This is acceptable: stock was last verified seconds ago.
-7. **Commit**.
+   - **Commit.** If anything in this step fails — including opening the transaction, which is where a dead shard fails — the reserved units are handed back with `core-client.releaseStock(branchId, items)` and the original error is rethrown.
+
+   Why this order: core's decrement is a separate database that cannot join our transaction, so one of the two goes first and the loser needs a compensation. Reserving first means a failure compensates by *releasing stock nobody saw*; committing first means it compensates by *cancelling an order the customer was already told about and the kitchen may already have on screen*. The second is both worse and likelier — losing a race for the last unit is routine, failing our own single-shard insert is not. Reserving first costs no lock time either: the round trip happens before the transaction opens rather than inside it.
+
+   The release is not transactional and core has no reservations ledger to match it against, so it must run **at most once per reserve**. Strict idempotency on `POST /orders` is what guarantees that: a replayed request is answered from the recorded response and never reaches the reserve.
 8. For `online`: hand off to payment service to create a Kashier session (separate endpoint `POST /payments/init`, or auto-trigger from the same controller — see §3).
 9. Publish WS `order.created` to `branch:<branchId>` (only for COD; online waits for capture).
 10. Return the `OrderResponseDTO`.
 
 ### Concurrency / race conditions
 
-- Two simultaneous orders racing the same last unit of stock: handled in `core-service` reserveStock (atomic decrement; returns 409 if any item underflows).
+- Two simultaneous orders racing the same last unit of stock: handled in `core-service` reserveStock (atomic decrement under `FOR UPDATE` in ascending product id order; returns 409 if any item underflows). Because the reserve now precedes the insert, the loser never has an order row at all — there is nothing to void.
+- A retried `POST /orders` after a timeout: the idempotency record answers it, so the reserve does not run twice. This is the single guard against a double decrement; core cannot detect the duplicate itself.
 - Idempotency: same key + same body within 24h → returns the original response. Same key + **different** body → 409 `IdempotencyConflict` (we hash the request body).
 
 ### Failure modes

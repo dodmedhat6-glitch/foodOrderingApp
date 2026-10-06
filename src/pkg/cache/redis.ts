@@ -14,12 +14,38 @@ export class RedisCacheProvider implements ICacheProvider {
         return this.client.get(key);
     }
 
+    /**
+     * `mget` is variadic and errors on an empty argument list, so the empty
+     * case short-circuits. ioredis returns `(string | null)[]` aligned with
+     * the requested keys, which is the contract callers index against.
+     */
+    async getMany(keys: string[]): Promise<(string | null)[]> {
+        if (keys.length === 0) return [];
+        return this.client.mget(keys);
+    }
+
     async set(key: string, value: string, ttlSeconds?: number): Promise<void> {
         if (ttlSeconds) {
             await this.client.set(key, value, "EX", ttlSeconds);
         } else {
             await this.client.set(key, value);
         }
+    }
+
+    /**
+     * Writes many keys in one round trip via a pipeline. Same motivation as
+     * `getMany`: repopulating a basket's worth of product projections should
+     * cost one network hop, not one per line.
+     */
+    async setMany(entries: Array<{key: string; value: string}>, ttlSeconds?: number): Promise<void> {
+        if (entries.length === 0) return;
+
+        const pipeline = this.client.pipeline();
+        for (const {key, value} of entries) {
+            if (ttlSeconds) pipeline.set(key, value, "EX", ttlSeconds);
+            else pipeline.set(key, value);
+        }
+        await pipeline.exec();
     }
 
     async del(key: string): Promise<number> {

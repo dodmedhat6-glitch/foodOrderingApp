@@ -5,7 +5,7 @@
  * branches, products and roles live once in core, so a projection of them is
  * the same value on every shard, and one invalidation event should clear it
  * everywhere. The `core:` prefix is also what the inbound core-events handlers
- * pattern-match on — see lib/core-events/handlers.ts.
+ * pattern-match on — see lib/core-client/projection.service.ts.
  */
 
 export const CORE_BRANCH_TTL_SEC = 60;

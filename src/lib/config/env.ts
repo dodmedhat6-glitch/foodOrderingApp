@@ -43,15 +43,46 @@ const baseSchema = z.object({
     WS_HEARTBEAT_SEC: z.string().default("30"),
 
     // ---- orders ----
-    // Platform service fee, in basis points of the subtotal. 0 today; the knob
-    // exists so turning it on is a config change, not a schema change.
-    PLATFORM_SERVICE_FEE_BPS: z.string().default("0"),
+    // The platform service fee is NOT here: it is a flat constant, the same in
+    // every region, and lives in app/order/constants.ts with the reasoning.
     // How long after an order is placed a customer may still cancel it
     // (docs/business-logic/orders.md s9).
     CUSTOMER_CANCELLATION_WINDOW_SEC: z.string().default("60"),
     // TTL for the cached restaurant order list. Short: the dashboard is
     // polled hard, but a stale pending-orders page costs the kitchen time.
     RESTAURANT_ORDERS_CACHE_TTL_SEC: z.string().default("10"),
+
+    // ---- payments (Kashier v3) ----
+    // Test and live differ only by the host prefix; the keys are per-mode and
+    // a test key never validates against the live host.
+    KASHIER_BASE_URL: z.string().default("https://test-api.kashier.io"),
+    KASHIER_MERCHANT_ID: z.string(),
+    // The *Payment* API Key: the `api-key` header on session creation, and the
+    // HMAC key every webhook signature is verified against. There is no
+    // separate webhook secret in Kashier — an earlier draft of this plan
+    // assumed one (KASHIER_WEBHOOK_SECRET) and it does not exist.
+    KASHIER_API_KEY: z.string(),
+    // The Secret Key: the actual credential, sent raw in `Authorization`.
+    KASHIER_SECRET_KEY: z.string(),
+    // Where Kashier returns the customer's browser after checkout. There is no
+    // separate failure URL in v3 — `failureRedirect` is a boolean and we send
+    // false, keeping a failed attempt on Kashier's page so the customer can
+    // retry inside the same session.
+    KASHIER_RETURN_URL: z.string(),
+    // Per-session server-to-server callback. Optional: left empty, Kashier
+    // delivers only to the webhooks configured on the merchant dashboard,
+    // which is what a deployed environment uses. Set it to a tunnel URL to
+    // receive webhooks on a developer machine.
+    KASHIER_SERVER_WEBHOOK_URL: z.string().default(""),
+    KASHIER_TIMEOUT_MS: z.string().default("10000"),
+    // Attempts the hosted checkout allows before it closes the session.
+    KASHIER_MAX_FAILURE_ATTEMPTS: z.string().default("3"),
+    KASHIER_DISPLAY_LANGUAGE: z.enum(["en", "ar"]).default("en"),
+    // How long a payment session stays open. Also how long an online order
+    // holds its reserved stock before the sweep gives it back.
+    PAYMENT_SESSION_TIMEOUT_MIN: z.string().default("15"),
+    // How often the sweep looks for sessions that have passed expires_at.
+    PAYMENT_EXPIRY_SWEEP_INTERVAL_SEC: z.string().default("60"),
 });
 
 const parsed = baseSchema.parse(process.env);
@@ -160,8 +191,23 @@ export const env = {
     },
 
     orders: {
-        serviceFeeBps: Number(parsed.PLATFORM_SERVICE_FEE_BPS),
         customerCancellationWindowSec: Number(parsed.CUSTOMER_CANCELLATION_WINDOW_SEC),
         restaurantListCacheTtlSec: Number(parsed.RESTAURANT_ORDERS_CACHE_TTL_SEC),
+    },
+
+    payments: {
+        sessionTimeoutMin: Number(parsed.PAYMENT_SESSION_TIMEOUT_MIN),
+        expirySweepIntervalSec: Number(parsed.PAYMENT_EXPIRY_SWEEP_INTERVAL_SEC),
+        kashier: {
+            baseUrl: parsed.KASHIER_BASE_URL,
+            merchantId: parsed.KASHIER_MERCHANT_ID,
+            apiKey: parsed.KASHIER_API_KEY,
+            secretKey: parsed.KASHIER_SECRET_KEY,
+            returnUrl: parsed.KASHIER_RETURN_URL,
+            serverWebhookUrl: parsed.KASHIER_SERVER_WEBHOOK_URL || undefined,
+            timeoutMs: Number(parsed.KASHIER_TIMEOUT_MS),
+            maxFailureAttempts: Number(parsed.KASHIER_MAX_FAILURE_ATTEMPTS),
+            display: parsed.KASHIER_DISPLAY_LANGUAGE,
+        },
     },
 };
