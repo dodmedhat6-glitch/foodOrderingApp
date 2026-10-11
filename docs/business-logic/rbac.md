@@ -53,19 +53,30 @@ If the cache lookup fails AND core-client is down → serve **stale** cache for 
 
 ## 3. Per-endpoint permissions table
 
-| Endpoint                                     | Required permission           | Notes                                  |
-| -------------------------------------------- | ----------------------------- | -------------------------------------- |
-| `POST /orders`                               | (customer role)               | Not RBAC — role gate                   |
-| `GET /orders/{id}`                           | varies (see Orders.md)        | Ownership in service                   |
-| `GET /customer/orders`                       | (customer role)               |                                        |
-| `GET /restaurant/orders`                     | `orders:read`                 | + `requireBranchAccess`                |
-| `PATCH /orders/{id}/status` accept/reject    | `orders:accept`               |                                        |
-| `PATCH /orders/{id}/status` preparing/ready  | `orders:update`               |                                        |
-| `PATCH /orders/{id}/status` cancelled        | `orders:cancel`               | Or customer (window) or admin          |
-| `POST /payments/init`                        | (customer + own order)        |                                        |
-| `POST /payments/webhook/{provider}`          | none (HMAC)                   |                                        |
-| `GET /payments/{id}`                         | `payments:read` or admin      |                                        |
-| `POST /payments/{id}/refund`                 | system_admin only             |                                        |
+`R/B` below abbreviates the tenant prefix
+`/restaurants/{restaurantId}/branches/{branchId}`. Every endpoint whose
+authorization is a **permission** rather than a role sits under it, because
+`requireRestaurantMember` and `requireBranchAccess` are middleware and
+middleware can only read what the path carries — the same arrangement as
+`core-service`. Role-gated endpoints (customer, agent, admin) stay flat: their
+subject is the JWT, so there is no tenancy to name.
+
+| Endpoint                                             | Required permission           | Notes                                  |
+| ---------------------------------------------------- | ----------------------------- | -------------------------------------- |
+| `POST /orders`                                       | (customer role)               | Not RBAC — role gate                   |
+| `GET /orders/{id}`                                   | (customer / agent / admin)    | Ownership in service                   |
+| `GET /customer/orders`                               | (customer role)               |                                        |
+| `PATCH /orders/{id}/status`                          | (customer / agent / admin)    | Cancel-in-window, picked, delivered. Rejects `restaurant_user` |
+| `GET R/B/orders`                                     | `orders:read`                 | + member + `requireBranchAccess`; query filters on both ids |
+| `GET R/B/orders/{id}`                                | `orders:read`                 | Same; out-of-branch id is a 404        |
+| `PATCH R/B/orders/{id}/status` accept/reject         | `orders:accept`               | Action derived from `body.status`      |
+| `PATCH R/B/orders/{id}/status` preparing/ready       | `orders:update`               |                                        |
+| `PATCH R/B/orders/{id}/status` cancelled             | `orders:cancel`               | Customer (window) and admin use the flat route |
+| `POST /payments/init`                                | (customer + own order)        |                                        |
+| `POST /payments/webhook/{provider}`                  | none (HMAC)                   |                                        |
+| `GET /payments/{id}`                                 | system_admin only             | Admin has no branch to name            |
+| `GET R/B/payments/{id}`                              | `payments:read`               | Scope reaches the order behind it      |
+| `POST /payments/{id}/refund`                         | system_admin only             |                                        |
 | `POST /deliveries/assign/{orderId}`          | `deliveries:assign` or admin  |                                        |
 | `POST /deliveries/reassign/{orderId}`        | `deliveries:assign` or admin  |                                        |
 | `PATCH /deliveries/{id}/status`              | (delivery_agent + ownership)  | Service checks `delivery.agent_id`     |
