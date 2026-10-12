@@ -1,10 +1,11 @@
-import {container} from "../di/container";
-import {TOKENS} from "../di/tokens";
-import {env} from "../config/env";
-import {logger} from "../logger/logger";
+import {container} from "../../lib/di/container";
+import {TOKENS} from "../../lib/di/tokens";
+import {env} from "../../lib/config/env";
+import {logger} from "../../lib/logger/logger";
 import {toMs} from "../../pkg/utils/time";
-import {REGIONS} from "../sharding/regions";
-import type {AssignmentService} from "../../app/delivery/service/assignment.service";
+import {REGIONS} from "../../lib/sharding/regions";
+import {register} from "../../lib/jobs/job-registry";
+import type {AssignmentService} from "./service/assignment.service";
 
 /**
  * Offers `preparing` and `ready` orders to nearby agents, over and over until one is claimed.
@@ -39,11 +40,11 @@ export async function runAssignmentSweep(): Promise<number> {
     return offered;
 }
 
-export function startAssignmentSweep(): NodeJS.Timeout {
-    const intervalMs = toMs(env.dispatch.sweepIntervalSec, "s");
-
-    void runAssignmentSweep();
-    const timer = setInterval(() => void runAssignmentSweep(), intervalMs);
-    timer.unref();
-    return timer;
+export function registerDeliveryJobs(): void {
+    register({
+        name: "delivery:assignment-sweep",
+        intervalMs: toMs(env.dispatch.sweepIntervalSec, "s"),
+        runOnStart: true,
+        handler: runAssignmentSweep,
+    });
 }

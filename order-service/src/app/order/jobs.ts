@@ -1,7 +1,8 @@
 import type {Knex} from "knex";
-import {db} from "../knex/knex";
-import {logger} from "../logger/logger";
-import {REGIONS} from "../sharding/regions";
+import {db} from "../../lib/knex/knex";
+import {logger} from "../../lib/logger/logger";
+import {REGIONS} from "../../lib/sharding/regions";
+import {register} from "../../lib/jobs/job-registry";
 
 /**
  * Native partition maintenance for `orders`.
@@ -12,7 +13,7 @@ import {REGIONS} from "../sharding/regions";
  * That also keeps partitioning reproducible from migrations alone, with no
  * superuser CREATE EXTENSION step in CI.
  *
- * Runs at boot and daily thereafter. Idempotent: creating a partition that
+ * Runs at worker boot and daily thereafter. Idempotent: creating a partition that
  * already exists is a no-op, so a missed run self-heals on the next tick, and
  * the DEFAULT partition catches anything that slips through in between.
  */
@@ -112,9 +113,11 @@ export async function runPartitionMaintenance(): Promise<PartitionMaintenanceRes
     return results;
 }
 
-export function startPartitionMaintenance(): NodeJS.Timeout {
-    void runPartitionMaintenance();
-    const timer = setInterval(() => void runPartitionMaintenance(), RUN_INTERVAL_MS);
-    timer.unref();
-    return timer;
+export function registerOrderJobs(): void {
+    register({
+        name: "order:partition-maintenance",
+        intervalMs: RUN_INTERVAL_MS,
+        runOnStart: true,
+        handler: runPartitionMaintenance,
+    });
 }

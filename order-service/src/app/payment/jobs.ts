@@ -1,10 +1,11 @@
-import {container} from "../di/container";
-import {TOKENS} from "../di/tokens";
-import {env} from "../config/env";
-import {logger} from "../logger/logger";
+import {container} from "../../lib/di/container";
+import {TOKENS} from "../../lib/di/tokens";
+import {env} from "../../lib/config/env";
+import {logger} from "../../lib/logger/logger";
 import {toMs} from "../../pkg/utils/time";
-import {REGIONS} from "../sharding/regions";
-import type {PaymentService} from "../../app/payment/service/payment.service";
+import {REGIONS} from "../../lib/sharding/regions";
+import {register} from "../../lib/jobs/job-registry";
+import type {PaymentService} from "./service/payment.service";
 
 /**
  * Closes payment sessions the customer can no longer pay on, and cancels the
@@ -23,7 +24,7 @@ import type {PaymentService} from "../../app/payment/service/payment.service";
  * wins outright.
  *
  * The real work is `PaymentService.expireStaleSessions` — this file is the
- * scheduler, exactly as `partition-maintenance.ts` is for partitions.
+ * job, exactly as `app/order/jobs.ts` is for partitions.
  * Resolved from the container per tick rather than at module load, so
  * importing this file never forces the payment module's graph to exist
  * (scripts and workers import it without one).
@@ -44,11 +45,11 @@ export async function runPaymentExpirySweep(): Promise<number> {
     return cancelled;
 }
 
-export function startPaymentExpirySweep(): NodeJS.Timeout {
-    const intervalMs = toMs(env.payments.expirySweepIntervalSec, "s");
-
-    void runPaymentExpirySweep();
-    const timer = setInterval(() => void runPaymentExpirySweep(), intervalMs);
-    timer.unref();
-    return timer;
+export function registerPaymentJobs(): void {
+    register({
+        name: "payment:expiry-sweep",
+        intervalMs: toMs(env.payments.expirySweepIntervalSec, "s"),
+        runOnStart: true,
+        handler: runPaymentExpirySweep,
+    });
 }

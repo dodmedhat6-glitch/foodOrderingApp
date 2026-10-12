@@ -1,10 +1,11 @@
-import {container} from "../di/container";
-import {TOKENS} from "../di/tokens";
-import {env} from "../config/env";
-import {logger} from "../logger/logger";
+import {container} from "../../lib/di/container";
+import {TOKENS} from "../../lib/di/tokens";
+import {env} from "../../lib/config/env";
+import {logger} from "../../lib/logger/logger";
 import {toMs} from "../../pkg/utils/time";
-import {REGIONS} from "../sharding/regions";
-import type {PresenceService} from "../../app/agent/service/presence.service";
+import {REGIONS} from "../../lib/sharding/regions";
+import {register} from "../../lib/jobs/job-registry";
+import type {PresenceService} from "./service/presence.service";
 
 /**
  * Collects presence tombstones — spatial entries whose liveness key has
@@ -32,11 +33,10 @@ export async function runPresenceSweep(): Promise<number> {
     return reaped;
 }
 
-export function startPresenceSweep(): NodeJS.Timeout {
-    const timer = setInterval(
-        () => void runPresenceSweep(),
-        toMs(env.presence.sweepIntervalSec, "s"),
-    );
-    timer.unref();
-    return timer;
+export function registerAgentJobs(): void {
+    register({
+        name: "agent:presence-sweep",
+        intervalMs: toMs(env.presence.sweepIntervalSec, "s"),
+        handler: runPresenceSweep,
+    });
 }

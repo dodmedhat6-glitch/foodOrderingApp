@@ -7,10 +7,6 @@ import {destroyAll, pingAll} from "./lib/knex/knex";
 import {messageBroker} from "./lib/messaging/init";
 import {startCoreEventsConsumer} from "./lib/core-events/consumer";
 import {registerCoreEventHandlers} from "./lib/core-events/handlers/index";
-import {startPartitionMaintenance} from "./lib/jobs/partition-maintenance";
-import {startPaymentExpirySweep} from "./lib/jobs/payment-expiry";
-import {startAssignmentSweep} from "./lib/jobs/assignment-sweep";
-import {startPresenceSweep} from "./lib/jobs/presence-sweep";
 import {attachWsServer} from "./lib/websocket/ws-server";
 import {container} from "./lib/di/container";
 import {TOKENS} from "./lib/di/tokens";
@@ -40,24 +36,8 @@ server.listen(env.port, async () => {
         logger.error("shard ping failed", {error: (err as Error).message});
     }
 
-    // `orders` is RANGE-partitioned by month; this pre-creates the next few
-    // months so a write never lands in the DEFAULT partition. Runs now and
-    // daily after. Must be after the shard ping, since it talks to every shard.
-    startPartitionMaintenance();
-
-    // Closes checkout sessions nobody paid and hands their reserved stock
-    // back to core. Must run after the shard ping for the same reason: it
-    // touches every shard.
-    startPaymentExpirySweep();
-
-    // Offers `ready` orders to nearby agents. This is dispatch's entry point,
-    // not a hook on the `ready` transition: a hook fires once, and an order
-    // that becomes ready while nobody is online would wait forever.
-    startAssignmentSweep();
-
-    // Collects presence tombstones — geo entries whose liveness key expired.
-    // Housekeeping only; the candidate scan already ignores them.
-    startPresenceSweep();
+    // Background jobs (partition maintenance, payment expiry, assignment and
+    // presence sweeps) run in the worker process — see worker.ts.
 
     messageBroker
         .connect()
