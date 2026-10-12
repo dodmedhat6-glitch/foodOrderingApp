@@ -192,6 +192,31 @@ another branch's order is a 404, not a 403.
 
 ---
 
+## 5b. Automatic refunds
+
+An online order that will never be delivered gets its money back without an
+admin:
+
+- **Rejected or cancelled** through `PATCH /orders/{id}/status`, from any status
+  — the customer gets no food, so they keep no charge. (Stock is different: it
+  only returns if the kitchen had not started; see `orders.md`.)
+  `OrderService.refundIfCancelled` → `PaymentService.refundCancelledOrder`
+  refunds the unrefunded remainder of **every** `succeeded` `charge` on the
+  order, so a double capture is returned in full and a partial manual refund is
+  topped up rather than repeated.
+- **Captured after the order moved on** — cancelled (including by the expiry
+  sweep) or already placed by an earlier capture. The webhook records the charge
+  and refunds it after commit (`refundChargeAutomatically`).
+
+Both go through the same path as §5, with the idempotency key fixed at
+`refund:<chargeId>:auto`, so the unique `transactions.idempotency_key` allows
+one automatic refund per charge however many paths ask. Both run **after** the
+status change commits and **never fail it**: a refund that cannot be issued is
+logged at `error` (`automatic refund failed; refund manually`) and left for an
+operator via §5.
+
+---
+
 ## 5a. The expiry sweep
 
 `lib/jobs/payment-expiry.ts`, every `PAYMENT_EXPIRY_SWEEP_INTERVAL_SEC`.
@@ -208,8 +233,8 @@ Every step is a compare-and-set, so two workers sweeping one region produce one
 cancellation, and a capture landing mid-sweep wins outright — `expireSession`
 sees a status that is no longer open and the order is left alone. A capture
 that arrives *after* the cancellation still records its ledger row (the money
-did move) and is logged for an operator to refund; it does not un-cancel the
-order.
+did move) and is refunded automatically once it commits (§5b); it does not
+un-cancel the order.
 
 ---
 
@@ -262,6 +287,7 @@ seed.
 | `payment_session.status='initialized'` for >30 min | the expiry sweep is not running | it should reach `expired` within a minute of `expires_at`; check the job and `PAYMENT_EXPIRY_SWEEP_INTERVAL_SEC` — stock is being held meanwhile |
 | rows in `payment_webhook_events` with `process_error` and no `processed_at` | a refused or a failed event | `AmountMismatch` / `SessionNotFound` are refusals needing a human; anything else is a processing failure Kashier will retry |
 | a `refund` row stuck `pending` with no `provider_reference_id` | the refund call never got a reply | check the order at Kashier; the money may or may not have moved, which is precisely why the row says `pending` |
+| log `automatic refund failed; refund manually` | provider refused or unreachable, or no captured session for the charge | refund through `POST /payments/{paymentId}/refund`; the cancellation itself already stands |
 | Kashier webhook spike of duplicates      | Kashier retries on slow webhook handler            | check handler latency; HMAC + unique constraint already de-dup |
 | Webhook signature mismatch               | secret rotation drift                              | update `KASHIER_WEBHOOK_SECRET`; replay `payment_webhook_events` not yet processed |
 | `transactions` insert blocks             | row lock on `restaurant_balances`                  | high contention — investigate concurrent payouts vs deliveries on the same restaurant |

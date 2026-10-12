@@ -305,14 +305,24 @@ export class PaymentWebhookService {
         if (!charge) return {processed: false, reason: "ChargeAlreadyRecorded"};
 
         // The order only becomes real to the kitchen now. A capture arriving
-        // for an order that has moved on (cancelled by the expiry sweep while
-        // the customer was paying) leaves the ledger row — the money did
-        // move — and is reported so an operator can refund it.
+        // for an order that has moved on — cancelled (by the customer, or by
+        // the expiry sweep while they were paying), or already placed by an
+        // earlier capture — leaves the ledger row, because the money did
+        // move, and refunds it once that row has committed: the refund
+        // addresses the charge by id, and an uncommitted charge has none to
+        // anyone else.
         if (order.status !== OrderStatus.PENDING_PAYMENT) {
-            logger.error("payment webhook: capture for an order no longer awaiting payment", {
+            logger.warn("payment webhook: capture for an order no longer awaiting payment; refunding", {
                 orderPublicId: order.publicId,
                 status: order.status,
                 paymentId: charge.id,
+            });
+            afterCommit.push(() => {
+                void this.paymentService.refundChargeAutomatically(
+                    charge,
+                    `captured_after_order_${order.status}`,
+                    session.region,
+                );
             });
             return undefined;
         }

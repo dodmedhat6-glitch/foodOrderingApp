@@ -60,6 +60,15 @@ import {OrderPaymentSummary, PaymentCallContext} from "../types";
 /** How many expired sessions one sweep tick closes per region. */
 const EXPIRY_SWEEP_BATCH = 200;
 
+/**
+ * The idempotency suffix of every automatic refund, so a charge can be
+ * refunded automatically at most once (`refund:<chargeId>:auto`).
+ */
+const AUTO_REFUND_KEY = "auto";
+
+/** `RefundRequestDTO.reason`'s limit, which the automatic path must respect too. */
+const AUTO_REFUND_REASON_MAX = 500;
+
 @injectable()
 export class PaymentService {
     /**
@@ -309,6 +318,92 @@ export class PaymentService {
                 error: (err as Error).message,
             });
             throw fromProviderError(err);
+        }
+    };
+
+    /**
+     * Gives the customer their money back for an order that will never be
+     * delivered — rejected by the restaurant, or cancelled by anyone.
+     *
+     * Every captured online charge on the order is refunded for whatever is
+     * still unrefunded. "Every" rather than "the": a customer who paid twice
+     * (two sessions both captured) is owed both back, and an admin who already
+     * refunded part by hand leaves only the rest to go.
+     *
+     * Called after the cancellation commits, never inside it. The provider is
+     * a third party over HTTP, and a slow or failing refund must not undo a
+     * cancellation that is true regardless — the refund row records what
+     * happened, and the webhook settles it.
+     */
+    refundCancelledOrder = async (
+        order: OrderEntity,
+        reason: string,
+        ctx: {correlationId?: string} = {},
+    ): Promise<void> => {
+        if (order.paymentMethod !== PaymentMethod.ONLINE) return;
+
+        let ledger: TransactionEntity[];
+        try {
+            ledger = await findTransactionsByOrderId(order.id, db(order.region));
+        } catch (err) {
+            logger.error("automatic refund skipped: ledger unreadable; refund manually", {
+                orderPublicId: order.publicId,
+                correlationId: ctx.correlationId,
+                error: (err as Error).message,
+            });
+            return;
+        }
+
+        const charges = ledger.filter(
+            (t) => t.type === TransactionType.CHARGE && t.status === TransactionStatus.SUCCEEDED,
+        );
+
+        for (const charge of charges) {
+            await this.refundChargeAutomatically(charge, reason, order.region, ctx);
+        }
+    };
+
+    /**
+     * Refunds what is left of one charge, on the system's behalf.
+     *
+     * Exposed for the webhook's late-capture case, where the charge is the one
+     * just recorded and the order behind it has already moved on.
+     *
+     * The idempotency key is fixed per charge (`refund:<chargeId>:auto`), so
+     * the unique `transactions.idempotency_key` allows exactly one automatic
+     * refund per charge however many paths ask for it. Never throws: the
+     * caller has already committed the thing that made the refund owed, and
+     * the failure is logged at `error` because it is money an operator now
+     * has to return by hand.
+     */
+    refundChargeAutomatically = async (
+        charge: TransactionEntity,
+        reason: string,
+        region: string,
+        ctx: {correlationId?: string} = {},
+    ): Promise<void> => {
+        try {
+            const remaining = charge.amount - (await sumRefundedAmount(charge.id, db(region)));
+            if (remaining <= 0) return;
+
+            await this.refund(
+                charge.id,
+                {amount: remaining, reason: reason.slice(0, AUTO_REFUND_REASON_MAX)},
+                region,
+                {region, correlationId: ctx.correlationId, idempotencyKey: AUTO_REFUND_KEY},
+            );
+            logger.info("automatic refund issued", {
+                paymentId: charge.id,
+                orderPublicId: charge.orderPublicId,
+                amount: remaining,
+            });
+        } catch (err) {
+            logger.error("automatic refund failed; refund manually", {
+                paymentId: charge.id,
+                orderPublicId: charge.orderPublicId,
+                correlationId: ctx.correlationId,
+                error: (err as Error).message,
+            });
         }
     };
 
