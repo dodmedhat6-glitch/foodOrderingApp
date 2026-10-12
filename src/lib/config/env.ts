@@ -83,6 +83,42 @@ const baseSchema = z.object({
     PAYMENT_SESSION_TIMEOUT_MIN: z.string().default("15"),
     // How often the sweep looks for sessions that have passed expires_at.
     PAYMENT_EXPIRY_SWEEP_INTERVAL_SEC: z.string().default("60"),
+
+    // ---- presence (Redis-only; docs/database-design.md s3.8) ----
+    // How long after an agent's last ping they still count as live. This value
+    // IS the TTL on `presence:meta:<region>:<agentId>` — nothing in code
+    // compares a timestamp to decide staleness, so changing the rule is
+    // changing this number. 300s = the agreed five-minute cutoff, which at a
+    // 30s ping cadence tolerates nine missed pings.
+    PRESENCE_STALE_SEC: z.string().default("300"),
+    // How often the sweep drops geo entries whose meta key has expired. Pure
+    // housekeeping: a tombstone is already invisible to the candidate scan.
+    PRESENCE_SWEEP_SEC: z.string().default("60"),
+
+    // ---- dispatch ----
+    // Radius of the first offer round, from the branch's coordinates.
+    ASSIGNMENT_RADIUS_METERS: z.string().default("5000"),
+    // Multiplier applied to the radius on each re-offer, and its ceiling.
+    ASSIGNMENT_RADIUS_ESCALATION: z.string().default("2"),
+    ASSIGNMENT_RADIUS_MAX_METERS: z.string().default("20000"),
+    // How many agents an order is offered to at once. They race; the first
+    // claim wins and the rest get `task.taken`.
+    ASSIGNMENT_CANDIDATES: z.string().default("5"),
+    // How long an offer round stands before the sweep re-offers it wider.
+    ASSIGNMENT_OFFER_TTL_SEC: z.string().default("45"),
+    // How often the sweep looks for `ready` orders nobody has claimed.
+    ASSIGNMENT_SWEEP_SEC: z.string().default("15"),
+    // Offer rounds before the order is declared stalled and an admin is told.
+    // The order stays `ready` — a stalled order is visible, never cancelled.
+    MAX_ASSIGNMENT_ATTEMPTS: z.string().default("3"),
+
+    // ---- agent earnings ----
+    // Stamped into agent_earnings at settlement and never recomputed, so a
+    // later rate change cannot restate last month's earnings. Deliberately
+    // independent of what the customer paid: a long cheap delivery still pays
+    // the agent for the distance.
+    AGENT_EARNING_BASE_MINOR: z.string().default("1500"),
+    AGENT_EARNING_PER_KM_MINOR: z.string().default("300"),
 });
 
 const parsed = baseSchema.parse(process.env);
@@ -193,6 +229,26 @@ export const env = {
     orders: {
         customerCancellationWindowSec: Number(parsed.CUSTOMER_CANCELLATION_WINDOW_SEC),
         restaurantListCacheTtlSec: Number(parsed.RESTAURANT_ORDERS_CACHE_TTL_SEC),
+    },
+
+    presence: {
+        staleSec: Number(parsed.PRESENCE_STALE_SEC),
+        sweepIntervalSec: Number(parsed.PRESENCE_SWEEP_SEC),
+    },
+
+    dispatch: {
+        radiusMeters: Number(parsed.ASSIGNMENT_RADIUS_METERS),
+        radiusEscalation: Number(parsed.ASSIGNMENT_RADIUS_ESCALATION),
+        radiusMaxMeters: Number(parsed.ASSIGNMENT_RADIUS_MAX_METERS),
+        candidates: Number(parsed.ASSIGNMENT_CANDIDATES),
+        offerTtlSec: Number(parsed.ASSIGNMENT_OFFER_TTL_SEC),
+        sweepIntervalSec: Number(parsed.ASSIGNMENT_SWEEP_SEC),
+        maxAttempts: Number(parsed.MAX_ASSIGNMENT_ATTEMPTS),
+    },
+
+    earnings: {
+        baseMinor: Number(parsed.AGENT_EARNING_BASE_MINOR),
+        perKmMinor: Number(parsed.AGENT_EARNING_PER_KM_MINOR),
     },
 
     payments: {

@@ -29,4 +29,17 @@ export interface ICacheProvider {
      * it already existed. Used for dedupe / distributed locks.
      */
     trySet(key: string, value: string, ttlSeconds?: number): Promise<boolean>;
+
+    /**
+     * Atomic increment, returning the new value, with the TTL applied on the
+     * increment that created the key.
+     *
+     * The TTL placement is the whole point: `INCR` on a missing key creates it
+     * with no expiry, so a counter incremented without this would live
+     * forever. Setting the TTL only on the first increment keeps the window
+     * measured from when counting started rather than sliding forward on every
+     * bump — a counter that renewed its own life could never expire while it
+     * was being used.
+     */
+    incrementWithTtl(key: string, ttlSeconds: number): Promise<number>;
 }

@@ -30,6 +30,13 @@ export function permittedChannels(user: JWTPayload): Set<string> {
     if (user.role === "delivery_agent") {
         allowed.add(`agent:${user.userId}`);
     }
+    if (user.role === "system_admin") {
+        // Operational alerts (dispatch stalls). Not a wildcard on the other
+        // channels: an admin who wants a specific customer's feed can still
+        // only reach it by being that customer, which keeps the channel list
+        // a statement about subjects rather than about privilege.
+        allowed.add("admin");
+    }
     return allowed;
 }
 

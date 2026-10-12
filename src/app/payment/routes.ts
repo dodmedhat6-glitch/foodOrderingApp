@@ -2,7 +2,7 @@ import {Router} from "express";
 import {container} from "../../lib/di/container";
 import {TOKENS} from "../../lib/di/tokens";
 import {authenticate, requireRole} from "../../lib/auth/guard";
-import {rbac} from "../../lib/auth/rbac";
+import {rbac, requireBranchAccess, requireRestaurantMember} from "../../lib/auth/rbac";
 import {SystemRole} from "../../lib/auth/roles";
 import {requireRegion} from "../../lib/sharding/region-resolver";
 import {idempotency} from "../../lib/idempotency/idempotency";
@@ -48,20 +48,44 @@ paymentRouter.post(
 );
 
 /**
- * GET /api/payments/:paymentId — gated on `payments:read`, which core seeds
- * onto `owner` alone (docs/business-logic/rbac.md). System admins bypass, as
- * everywhere. A restaurant user still only sees payments on their own
- * restaurant's orders; `rbac()` grants the capability, and the service
- * applies the tenancy.
+ * A payment is read under two paths, for the same reason orders are
+ * (app/order/routes.ts):
  *
- * Not cached: a payment's status is exactly the thing a caller is polling
- * for, and the read is a single primary-key lookup.
+ *  - `GET /api/restaurants/:restaurantId/branches/:branchId/payments/:paymentId`
+ *    — restaurant staff. `payments:read` is a permission in core's catalog,
+ *    seeded onto `owner` alone (docs/business-logic/rbac.md), and checking a
+ *    permission against a tenant resource is exactly what wants the tenancy in
+ *    the path: `requireRestaurantMember` and `requireBranchAccess` then run as
+ *    middleware, and the branch travels into the order lookup behind the
+ *    payment so the read is filtered by it rather than merely checked against
+ *    it.
+ *  - `GET /api/payments/:paymentId` — system admins, who have no restaurant or
+ *    branch to name and would otherwise have to guess a pair to satisfy the
+ *    nested path. Kept role-gated rather than rbac-gated so the flat route
+ *    cannot become a way around the permission check above.
+ *
+ * Neither is cached: a payment's status is exactly the thing a caller is
+ * polling for, and the read is a single primary-key lookup.
  */
+export const restaurantPaymentRouter = Router({mergeParams: true});
+
+restaurantPaymentRouter.get(
+    "/payments/:paymentId",
+    authenticate,
+    requireRegion,
+    requireRestaurantMember("restaurantId"),
+    requireBranchAccess("branchId"),
+    rbac({resource: "payments", action: "read"}),
+    paymentController.getById,
+);
+
+paymentRouter.use("/restaurants/:restaurantId/branches/:branchId", restaurantPaymentRouter);
+
 paymentRouter.get(
     "/payments/:paymentId",
     authenticate,
     requireRegion,
-    rbac({resource: "payments", action: "read"}),
+    requireRole(SystemRole.SYSTEM_ADMIN),
     paymentController.getById,
 );
 

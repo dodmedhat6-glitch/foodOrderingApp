@@ -2,7 +2,7 @@ import {inject, injectable} from "tsyringe";
 import {TOKENS} from "../di/tokens";
 import {logger} from "../logger/logger";
 import {ICacheProvider} from "../../pkg/cache/cache.interface";
-import {branchKey, branchRejectingOrdersKey, restaurantSuspendedKey} from "./cache-keys";
+import {branchKey, branchRejectingOrdersKey, restaurantSuspendedKey, userKey} from "./cache-keys";
 import {cacheBranch, readCachedBranch} from "./branch.client";
 import {cacheBranchProducts, readCachedBranchProduct} from "./product.client";
 import {
@@ -64,6 +64,20 @@ export class CoreProjectionService {
      * payload there was no way to set it, and the check was dead code waiting
      * for an event that never came.
      */
+    /**
+     * Drops a user's cached display identity.
+     *
+     * A delete rather than a patch, and not by preference: core's user
+     * invalidation payload carries only the id, so there is no committed value
+     * to correct the projection with. The rule (CLAUDE.md) is patch when the
+     * payload carries every field needed and delete when it does not — this is
+     * the second case, and the next read pays one upstream call to learn the
+     * new name.
+     */
+    forgetUser = async (userId: number): Promise<void> => {
+        await this.cache.del(userKey(userId)).catch(() => {});
+    };
+
     applyBranchChange = async (branchId: number, patch: BranchProjectionPatch): Promise<void> => {
         const flags = definedFields(patch);
 

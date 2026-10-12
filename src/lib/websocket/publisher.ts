@@ -20,6 +20,13 @@ export const wsChannels = {
     restaurant: (restaurantId: number) => `restaurant:${restaurantId}`,
     branch: (branchId: number) => `branch:${branchId}`,
     agent: (agentId: number) => `agent:${agentId}`,
+    /**
+     * The one channel that is not scoped to a subject: operational alerts for
+     * whoever is on duty. Joined only by `system_admin` (ws-auth.ts), and it
+     * carries no customer data — an `assignment.stalled` says which order and
+     * which branch, not who ordered what.
+     */
+    admin: () => "admin",
 };
 
 /**

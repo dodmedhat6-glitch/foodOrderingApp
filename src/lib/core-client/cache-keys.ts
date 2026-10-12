@@ -11,6 +11,13 @@
 export const CORE_BRANCH_TTL_SEC = 60;
 export const CORE_PRODUCT_TTL_SEC = 30;
 export const CORE_PERMISSIONS_TTL_SEC = 300;
+/**
+ * Short, because the only thing it holds is a display name on a screen the
+ * customer is actively refreshing — and because `core.user.invalidated`
+ * clears it anyway, so the TTL is the backstop for a missed event, not the
+ * mechanism.
+ */
+export const CORE_USER_TTL_SEC = 60;
 
 export function branchKey(branchId: number): string {
     return `core:branch:${branchId}`;
@@ -18,6 +25,11 @@ export function branchKey(branchId: number): string {
 
 export function productKey(branchId: number, productId: number): string {
     return `core:product:${branchId}:${productId}`;
+}
+
+/** Display identity (name) for a user core owns — see user.client.ts. */
+export function userKey(userId: number): string {
+    return `core:user:${userId}`;
 }
 
 export function rolePermissionsKey(role: string): string {

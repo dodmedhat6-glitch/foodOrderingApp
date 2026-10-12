@@ -24,21 +24,28 @@ import {SystemRole} from "../../../lib/auth/roles";
 import {OrderEntity} from "../entity/order.entity";
 import {OrderItemEntity} from "../entity/order-item.entity";
 import {OrderActor, OrderStatus, OrderWsEvent, PaymentMethod} from "../enums";
+import {AgentOrderFilters, OrderScope} from "../types";
 import {
     AddressNotOwnedError,
     BranchNotAcceptingOrdersError,
     CancellationWindowExpiredError,
+    dispatchManagedTransitionError,
     DuplicateProductInOrderError,
     OrderNotFoundError,
     OutOfStockLine,
     outOfStockError,
 } from "../errors";
 import {
+    claimOrderForAgent,
     CreatedAtWindow,
     createOrder,
+    findActiveOrderForAgent,
     findOrderByPublicId,
+    findOrdersByAgent,
     findOrdersByBranch,
     findOrdersByCustomer,
+    findUnclaimedReadyOrders,
+    releaseOrderFromAgent,
     updateOrderStatus,
 } from "../repository/order.repo";
 import {
@@ -61,6 +68,8 @@ import {OrderStatusService} from "./order-status.service";
 // would close the cycle at require() time. The instance is resolved from the
 // container at call time instead (see `payments`).
 import type {PaymentService} from "../../payment/service/payment.service";
+// Type-only for the same reason: the delivery module imports this file.
+import type {DeliveryService} from "../../delivery/service/delivery.service";
 
 /** The authenticated caller, as resolved from the JWT by the controller. */
 export interface OrderRequester {
@@ -83,6 +92,38 @@ const PUBLIC_ID_WINDOW_MS = toMs(1, "m");
 
 /** `status_reason` on an order the payment-expiry sweep cancels. */
 const PAYMENT_EXPIRED_REASON = "payment_session_expired";
+
+/**
+ * Targets `PATCH /status` refuses outright, whoever is asking.
+ *
+ * Both edges move more than the status: entering `assigned` writes
+ * `delivery_agent_id` and `assigned_at`, and leaving it clears them. Reached
+ * through the generic status endpoint they would move the status alone, and an
+ * order would end up `ready` with an agent still attached — or `assigned` to
+ * nobody.
+ *
+ * The status machine already restricts both edges to `OrderActor.SYSTEM`, but
+ * an admin may traverse any edge that exists, so the machine alone does not
+ * close this. The dispatch endpoints (`/claim`, `/unclaim`, `/assign`) write
+ * every column in one UPDATE and are the only way in.
+ */
+const DISPATCH_MANAGED_TARGETS: ReadonlySet<OrderStatus> = new Set([
+    OrderStatus.ASSIGNED,
+    OrderStatus.READY,
+]);
+
+/** How far back `GET /api/agents/tasks` looks when the caller names no range. */
+const AGENT_TASK_WINDOW_DAYS = 30;
+
+/**
+ * Agent transitions the delivery module handles rather than this one. Both
+ * carry side effects beyond the status column — a presence update, and in
+ * `delivered`'s case the whole settlement transaction.
+ */
+const DELIVERY_OWNED_TARGETS: ReadonlySet<OrderStatus> = new Set([
+    OrderStatus.PICKED,
+    OrderStatus.DELIVERED,
+]);
 
 @injectable()
 export class OrderService {
@@ -271,21 +312,48 @@ export class OrderService {
     private payments = (): PaymentService =>
         container.resolve<PaymentService>(TOKENS.PaymentService);
 
-    /** GET /api/orders/{publicId} — header, lines, payment summary, timeline. */
+    /**
+     * Resolved per call, not injected, for the same reason as `payments`: the
+     * delivery module imports this service, so a constructor dependency the
+     * other way would close the cycle at require() time.
+     */
+    private delivery = (): DeliveryService =>
+        container.resolve<DeliveryService>(TOKENS.DeliveryService);
+
+    /**
+     * One order in full — header, lines, payment summary, timeline.
+     *
+     * Serves both shapes of the read, and `scope` is the only difference
+     * between them:
+     *  - `GET /api/orders/{publicId}` — the caller-scoped read. A customer or
+     *    an agent holds the public id and nothing else; who may see it is
+     *    decided entirely by `assertCanReadOrder`.
+     *  - `GET /api/restaurants/{restaurantId}/branches/{branchId}/orders/{publicId}`
+     *    — restaurant staff, where the path already names the tenancy that
+     *    `rbac()` and `requireBranchAccess` were applied against. Passing it
+     *    down means the query filters on it too, so an order id from another
+     *    branch of the same restaurant finds no row rather than relying on the
+     *    assertion below to turn it away.
+     */
     getOrder = async (
         publicId: string,
         region: string,
         requester: OrderRequester,
+        scope?: OrderScope,
     ): Promise<OrderDetailResponseDTO> => {
         const conn = db(region);
-        const order = await findOrderByPublicId(publicId, conn, publicIdWindow(publicId));
+        const order = await findOrderByPublicId(publicId, conn, publicIdWindow(publicId), scope);
         if (!order) throw OrderNotFoundError;
 
         this.assertCanReadOrder(order, requester);
 
         const items = await findItemsByOrderIds([order.id], conn);
         const paymentSummary = await this.payments().summarizeForOrder(order, conn);
-        return OrderDetailResponseDTO.fromDetail(order, items, paymentSummary);
+        // Who is bringing it. Resolved through the delivery module, which owns
+        // the agent lookup and its failure policy — an unreachable core must
+        // not fail a customer's tracking screen.
+        const delivery = await this.delivery().summarize(order);
+        return OrderDetailResponseDTO.fromDetail(order, items, paymentSummary, undefined, delivery);
     };
 
     /**
@@ -298,9 +366,18 @@ export class OrderService {
      * is a `findByPublicId` whoever asks. The authorisation lives in
      * `getOrder` and in `assertCanRead`, which callers that need it invoke
      * explicitly rather than getting silently.
+     *
+     * `scope` is for the callers that *do* have an HTTP caller behind a
+     * `/restaurants/:restaurantId/branches/:branchId/...` path — the payment
+     * read is one — so their lookup filters on the branch too and never sees
+     * an order outside it. The webhook and the sweeps pass none.
      */
-    findByPublicId = async (publicId: string, conn: Knex): Promise<OrderEntity> => {
-        const order = await findOrderByPublicId(publicId, conn, publicIdWindow(publicId));
+    findByPublicId = async (
+        publicId: string,
+        conn: Knex,
+        scope?: OrderScope,
+    ): Promise<OrderEntity> => {
+        const order = await findOrderByPublicId(publicId, conn, publicIdWindow(publicId), scope);
         if (!order) throw OrderNotFoundError;
         return order;
     };
@@ -321,15 +398,22 @@ export class OrderService {
         return this.toSummaryPage(orders, params, conn);
     };
 
-    /** GET /api/restaurant/orders — branch-scoped operations dashboard. */
+    /**
+     * GET /api/restaurants/{restaurantId}/branches/{branchId}/orders — the
+     * branch-scoped operations dashboard.
+     *
+     * Takes the whole scope rather than a bare branch id: the pair comes from
+     * the path, and handing the repository both is what keeps a mismatched
+     * pair returning an empty page instead of another restaurant's queue.
+     */
     listRestaurantOrders = async (
-        branchId: number,
+        scope: OrderScope,
         params: PaginationParams,
         filters: ListOrdersFilters,
         region: string,
     ): Promise<{data: OrderSummaryResponseDTO[]; meta: PaginationMeta}> => {
         const conn = db(region);
-        const orders = await findOrdersByBranch(branchId, params, filters, conn);
+        const orders = await findOrdersByBranch(scope, params, filters, conn);
         return this.toSummaryPage(orders, params, conn);
     };
 
@@ -348,16 +432,41 @@ export class OrderService {
         reason: string | undefined,
         requester: OrderRequester,
         region: string,
+        scope?: OrderScope,
     ): Promise<OrderStatusResponseDTO> => {
         const conn = db(region);
-        const order = await findOrderByPublicId(publicId, conn, publicIdWindow(publicId));
+        const order = await findOrderByPublicId(publicId, conn, publicIdWindow(publicId), scope);
         if (!order) throw OrderNotFoundError;
 
         this.assertCanReadOrder(order, requester);
 
+        // `ready` is a legal target only from `preparing`; from `assigned` it
+        // is an unclaim, which has its own endpoint because it has to clear the
+        // agent too.
+        if (
+            DISPATCH_MANAGED_TARGETS.has(target) &&
+            !(target === OrderStatus.READY && order.status === OrderStatus.PREPARING)
+        ) {
+            throw dispatchManagedTransitionError(order.status, target);
+        }
+
         const actor = this.resolveActor(order, requester);
         this.statusService.assertReason(target, reason);
         const timestampColumn = this.statusService.assertTransition(order.status, target, actor);
+
+        // `picked` and `delivered` belong to the delivery module: the second
+        // one is a settlement that happens to end in a status change, and
+        // writing it here would move the status without the money. The
+        // endpoint stays the single one this service exposes (CLAUDE.md s4) —
+        // only the handler differs.
+        if (actor === OrderActor.AGENT && DELIVERY_OWNED_TARGETS.has(target)) {
+            const moved = await this.delivery().handleAgentTransition(
+                order,
+                target,
+                requester.userId,
+            );
+            return OrderStatusResponseDTO.from(moved);
+        }
 
         if (
             actor === OrderActor.CUSTOMER &&
@@ -382,8 +491,50 @@ export class OrderService {
 
         await this.invalidateBranchOrderLists(updated.branchId);
         this.publishStatusChange(updated, reason);
+        await this.afterTransition(updated, order, reason);
 
         return OrderStatusResponseDTO.from(updated);
+    };
+
+    /**
+     * Side effects a transition owes to dispatch, run after the write commits.
+     *
+     * Two cases, and both are *nudges* rather than mechanisms:
+     *
+     *  - **`ready`** — tell the sweep there is work, so an order placed while
+     *    agents are already online is offered in milliseconds instead of on
+     *    the next tick. The sweep remains the thing that guarantees the offer
+     *    happens; this only makes the common case fast. That is why a failure
+     *    here is logged and dropped: the worst outcome is a wait of one sweep
+     *    interval.
+     *  - **`cancelled`** — free the agent who was carrying it and tell them to
+     *    stop driving. The order row already lost its agent in the transition;
+     *    this is the Redis side plus the courtesy.
+     *
+     * Best-effort throughout. The transition has committed, and nothing here
+     * can un-commit it — turning a notification failure into a 500 would tell
+     * the caller their cancellation failed when it did not.
+     */
+    private afterTransition = async (
+        updated: OrderEntity,
+        previous: OrderEntity,
+        reason?: string,
+    ): Promise<void> => {
+        try {
+            if (updated.status === OrderStatus.READY) {
+                await this.delivery().nudgeDispatch(updated);
+                return;
+            }
+            if (updated.status === OrderStatus.CANCELLED && previous.deliveryAgentId) {
+                await this.delivery().releaseOnCancellation(previous, reason);
+            }
+        } catch (err) {
+            logger.warn("post-transition dispatch hook failed", {
+                orderPublicId: updated.publicId,
+                status: updated.status,
+                error: (err as Error).message,
+            });
+        }
     };
 
     /**
@@ -406,18 +557,40 @@ export class OrderService {
         target: OrderStatus,
         conn: Knex,
         reason?: string,
+    ): Promise<OrderEntity> => this.transitionInTrx(order, target, OrderActor.SYSTEM, conn, {reason});
+
+    /**
+     * The same thing for an actor who is not the system — today, an agent
+     * stamping `picked` or `delivered` inside the settlement transaction.
+     *
+     * Exists because settlement is one unit of work: the status flip, the
+     * commission stamp, the ledger rows, the balance and the agent's earning
+     * all commit together or not at all. The public `updateStatus` runs its own
+     * write and cannot be enlisted in somebody else's transaction, so the
+     * delivery module composes this instead.
+     *
+     * `commission` rides along so it lands in the *same* UPDATE as the status:
+     * a settled order and its commission can then never disagree.
+     */
+    transitionInTrx = async (
+        order: OrderEntity,
+        target: OrderStatus,
+        actor: OrderActor,
+        conn: Knex,
+        opts: {reason?: string; commission?: number} = {},
     ): Promise<OrderEntity> => {
-        const timestampColumn = this.statusService.assertTransition(
-            order.status,
-            target,
-            OrderActor.SYSTEM,
-        );
+        const timestampColumn = this.statusService.assertTransition(order.status, target, actor);
 
         const updated = await updateOrderStatus(
             order.id,
             order.createdAt,
             order.status,
-            {status: target, statusReason: reason ?? null, timestampColumn},
+            {
+                status: target,
+                statusReason: opts.reason ?? null,
+                timestampColumn,
+                commission: opts.commission,
+            },
             conn,
         );
         // Zero rows means something else moved the order between the read and
@@ -477,6 +650,113 @@ export class OrderService {
 
         this.publishCreated(order, count?.count ?? 0);
         this.publishStatusChange(order);
+        await this.invalidateBranchOrderLists(order.branchId);
+    };
+
+    // ---------------------------------------------------------------------
+    // Dispatch surface
+    //
+    // The delivery module owns *when* an order is claimed, released or
+    // settled; this module owns the `orders` table. Cross-module reads and
+    // writes go through services, never repositories (CLAUDE.md s3), so these
+    // are the thin data operations the delivery module composes. The policy
+    // — presence checks, broadcasts, money — deliberately lives there, not
+    // here.
+    // ---------------------------------------------------------------------
+
+    /**
+     * Attempts the claim. Resolves to the updated order, or `undefined` when
+     * another agent got there first.
+     *
+     * `undefined` is an ordinary outcome, not a failure — several agents are
+     * offered the same order on purpose and all but one must lose. The
+     * conditional UPDATE underneath is what decides it (order.repo), which is
+     * why nothing here takes a lock.
+     */
+    claimForAgent = async (
+        order: OrderEntity,
+        agentId: number,
+        conn: Knex = db(order.region),
+    ): Promise<OrderEntity | undefined> => {
+        // Validated even though the UPDATE's own predicate would catch it:
+        // being the system is permission to traverse the system's edges, not
+        // licence to invent one (same rule as `transitionBySystem`).
+        this.statusService.assertTransition(
+            OrderStatus.READY,
+            OrderStatus.ASSIGNED,
+            OrderActor.SYSTEM,
+        );
+        return claimOrderForAgent(order.id, order.createdAt, agentId, conn);
+    };
+
+    /** The inverse. `undefined` when the agent no longer holds it. */
+    releaseFromAgent = async (
+        order: OrderEntity,
+        agentId: number,
+        conn: Knex = db(order.region),
+    ): Promise<OrderEntity | undefined> => {
+        this.statusService.assertTransition(
+            OrderStatus.ASSIGNED,
+            OrderStatus.READY,
+            OrderActor.SYSTEM,
+        );
+        return releaseOrderFromAgent(order.id, order.createdAt, agentId, conn);
+    };
+
+    /**
+     * The order an agent is currently carrying, read from `orders`.
+     *
+     * Every decision that assigns or releases work asks this rather than the
+     * presence hash. The hash holds a copy so the candidate scan is cheap, but
+     * it lives in Redis and is allowed to vanish — so it answers "probably
+     * busy", and this answers "busy".
+     */
+    findActiveForAgent = async (
+        agentId: number,
+        region: string,
+    ): Promise<OrderEntity | undefined> => findActiveOrderForAgent(agentId, db(region));
+
+    /** One page of an agent's tasks, as entities for the delivery module to shape. */
+    listForAgent = async (
+        agentId: number,
+        params: PaginationParams,
+        filters: AgentOrderFilters,
+        region: string,
+    ): Promise<{data: OrderEntity[]; meta: PaginationMeta}> => {
+        const orders = await findOrdersByAgent(
+            agentId,
+            params,
+            filters,
+            recentWindow(AGENT_TASK_WINDOW_DAYS),
+            db(region),
+        );
+
+        return buildPaginationResultBy(orders, params.limit, (order) =>
+            String(order.createdAt.getTime()),
+        );
+    };
+
+    /**
+     * The dispatch sweep's input: `ready` orders nobody has claimed.
+     *
+     * Bounded to recent months because an order that has been waiting longer
+     * than the window is not waiting for an agent any more — it is a support
+     * case, and sweeping it forever would mean re-offering it forever.
+     */
+    findUnclaimedReady = async (region: string, limit: number): Promise<OrderEntity[]> =>
+        findUnclaimedReadyOrders(recentWindow(AGENT_TASK_WINDOW_DAYS), limit, db(region));
+
+    /**
+     * The post-commit chores every dispatch transition owes: clear the
+     * branch's cached dashboard pages and tell the sockets.
+     *
+     * Exposed rather than restated in the delivery module because a transition
+     * that broadcasts differently depending on which module wrote it is a bug
+     * waiting to happen — the kitchen's view of an order must not depend on
+     * who moved it.
+     */
+    announceTransition = async (order: OrderEntity, reason?: string): Promise<void> => {
+        this.publishStatusChange(order, reason);
         await this.invalidateBranchOrderLists(order.branchId);
     };
 
@@ -772,6 +1052,19 @@ function outOfStockLinesFromCoreError(err: unknown): OutOfStockLine[] | undefine
             typeof (line as OutOfStockLine).productId === "number",
     );
     return lines.length > 0 ? lines : undefined;
+}
+
+/**
+ * A `created_at` window covering the last N days, for reads that have no
+ * natural bound of their own (an agent's task list, the dispatch sweep).
+ *
+ * Without one, both queries fan out across every month partition that exists,
+ * and they are the two reads that run most often — the sweep every 15 seconds
+ * per region, the task list on every agent's poll.
+ */
+function recentWindow(days: number): CreatedAtWindow {
+    const to = new Date(Date.now() + toMs(1, "d"));
+    return {from: new Date(Date.now() - toMs(days, "d")), to};
 }
 
 /**

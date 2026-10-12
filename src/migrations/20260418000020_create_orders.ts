@@ -110,7 +110,10 @@ export async function up(knex: Knex): Promise<void> {
         CREATE INDEX idx_orders_public_id ON orders (public_id);
         -- supports GET /api/customer/orders?year=YYYY
         CREATE INDEX idx_orders_customer_id_created_at ON orders (customer_id, created_at DESC);
-        -- supports GET /api/restaurant/orders?branchId=&status=&from=&to= (hottest read path)
+        -- supports GET /api/restaurants/:restaurantId/branches/:branchId/orders?status=&from=&to= (hottest read path).
+        -- restaurant_id is a filter on top of this index, not a term in it: a branch
+        -- belongs to one restaurant, so it adds no selectivity — only the guarantee
+        -- that the query cannot cross a tenant boundary.
         CREATE INDEX idx_orders_branch_status_created_at ON orders (branch_id, status, created_at DESC);
         -- supports the delivery-assignment sweep for unassigned orders in a region (Phase 3)
         CREATE INDEX idx_orders_status_created_at ON orders (status, created_at)

@@ -1,7 +1,13 @@
 import {Knex} from "knex";
 import {OrderEntity} from "../entity/order.entity";
 import {OrderStatus} from "../enums";
-import {CreateOrderInput, ListOrdersFilters, UpdateOrderStatusInput} from "../types";
+import {
+    AgentOrderFilters,
+    CreateOrderInput,
+    ListOrdersFilters,
+    OrderScope,
+    UpdateOrderStatusInput,
+} from "../types";
 import {PaginationParams} from "../../../lib/http/pagination/cursor-pagination";
 
 const ORDER_COLUMNS = [
@@ -40,6 +46,13 @@ const ORDER_COLUMNS = [
     "delivered_at",
     "cancelled_at",
 ];
+
+/**
+ * What an agent's task list shows when no status filter is given: the work in
+ * front of them, not their history. Delivered orders are reachable by asking
+ * for them explicitly, and the month's earnings are a different endpoint.
+ */
+const ACTIVE_AGENT_STATUSES = [OrderStatus.ASSIGNED, OrderStatus.PICKED];
 
 function toEntity(row: any): OrderEntity {
     return new OrderEntity({
@@ -129,15 +142,32 @@ export async function createOrder(data: CreateOrderInput, conn: Knex): Promise<O
     return toEntity(row);
 }
 
+/**
+ * One order by its public id, optionally narrowed to a branch.
+ *
+ * `scope` is how the restaurant-facing endpoints keep their tenancy in the
+ * query instead of beside it: on
+ * `/restaurants/:restaurantId/branches/:branchId/orders/:orderId` the lookup
+ * filters on all three ids, so an order id from a neighbouring branch matches
+ * no row. Callers with no HTTP caller to scope — the payment webhook, the
+ * expiry sweep — pass none.
+ *
+ * The extra predicates need no index of their own. `public_id` is already
+ * unique within a partition, so they are evaluated against the single row the
+ * index produced.
+ */
 export async function findOrderByPublicId(
     publicId: string,
     conn: Knex,
     window?: CreatedAtWindow,
+    scope?: OrderScope,
 ): Promise<OrderEntity | undefined> {
     const query = conn("orders").select(ORDER_COLUMNS).where("public_id", publicId);
     if (window) {
         query.where("created_at", ">=", window.from).where("created_at", "<", window.to);
     }
+    applyScope(query, scope);
+
     const row = await query.first();
     return row ? toEntity(row) : undefined;
 }
@@ -165,17 +195,26 @@ export async function findOrdersByCustomer(
 }
 
 /**
- * GET /api/restaurant/orders — the hottest read path, backed by
- * idx_orders_branch_status_created_at. That index is why branch_id and status
- * are equality predicates and created_at is the range column.
+ * GET /api/restaurants/{restaurantId}/branches/{branchId}/orders — the
+ * hottest read path, backed by idx_orders_branch_status_created_at. That index
+ * is why branch_id and status are equality predicates and created_at is the
+ * range column.
+ *
+ * `restaurant_id` is in the predicate as well, and deliberately *after*
+ * branch_id in the index's terms rather than added to the index: a branch
+ * belongs to exactly one restaurant, so the column is redundant for selectivity
+ * and indexing it would buy nothing (CLAUDE.md s7 — no speculative indexes).
+ * What it buys is that the query cannot return another restaurant's rows even
+ * if a branch id from the path were ever wrong.
  */
 export async function findOrdersByBranch(
-    branchId: number,
+    scope: OrderScope,
     params: PaginationParams,
     filters: ListOrdersFilters,
     conn: Knex,
 ): Promise<OrderEntity[]> {
-    const query = conn("orders").select(ORDER_COLUMNS).where("branch_id", branchId);
+    const query = conn("orders").select(ORDER_COLUMNS);
+    applyScope(query, scope);
 
     if (filters.status) query.where("status", filters.status);
     if (filters.from) query.where("created_at", ">=", filters.from);
@@ -211,6 +250,10 @@ export async function updateOrderStatus(
     };
     if (data.statusReason !== undefined) patch.status_reason = data.statusReason;
     if (data.timestampColumn) patch[data.timestampColumn] = now;
+    // Settlement stamps the commission in the same UPDATE that moves the
+    // order to `delivered`, so the money and the status can never disagree
+    // about whether a delivery was settled.
+    if (data.commission !== undefined) patch.commission = data.commission;
 
     const [row] = await conn("orders")
         .where("id", orderId)
@@ -222,19 +265,173 @@ export async function updateOrderStatus(
     return row ? toEntity(row) : undefined;
 }
 
-export async function setDeliveryAgent(
+/**
+ * The claim. **This is the arbiter of the dispatch race**, and the reason
+ * there is no lock, no Redis reservation and no `deliveries` row holding a
+ * pending offer anywhere in this service.
+ *
+ * An order is offered to several agents at once; they all race here. The
+ * `status = 'ready' AND delivery_agent_id IS NULL` predicate means exactly one
+ * UPDATE can match — Postgres serialises the row and the losers see the
+ * already-written values. Zero rows affected is therefore not an error
+ * condition to retry, it is the answer: somebody else won.
+ *
+ * `created_at` is in the predicate for the usual two reasons — it is half the
+ * primary key, and it prunes the write to one partition.
+ */
+export async function claimOrderForAgent(
     orderId: number,
     createdAt: Date,
-    deliveryAgentId: number,
+    agentId: number,
+    conn: Knex,
+): Promise<OrderEntity | undefined> {
+    const now = new Date();
+    const [row] = await conn("orders")
+        .where("id", orderId)
+        .where("created_at", createdAt)
+        .where("status", OrderStatus.READY)
+        .whereNull("delivery_agent_id")
+        .update({
+            status: OrderStatus.ASSIGNED,
+            delivery_agent_id: agentId,
+            assigned_at: now,
+            updated_at: now,
+        })
+        .returning(ORDER_COLUMNS);
+
+    return row ? toEntity(row) : undefined;
+}
+
+/**
+ * The inverse: hand an `assigned` order back to the pool.
+ *
+ * Scoped to the agent who holds it, so one agent can never unclaim another's
+ * work, and to `assigned`, so a `picked` order cannot be abandoned with the
+ * food already in the bag. `assigned_at` is cleared because the order is
+ * genuinely unassigned again — leaving it set would make the next sweep's
+ * offer look like a re-offer of a live assignment.
+ */
+export async function releaseOrderFromAgent(
+    orderId: number,
+    createdAt: Date,
+    agentId: number,
     conn: Knex,
 ): Promise<OrderEntity | undefined> {
     const [row] = await conn("orders")
         .where("id", orderId)
         .where("created_at", createdAt)
-        .update({delivery_agent_id: deliveryAgentId, updated_at: new Date()})
+        .where("status", OrderStatus.ASSIGNED)
+        .where("delivery_agent_id", agentId)
+        .update({
+            status: OrderStatus.READY,
+            delivery_agent_id: null,
+            assigned_at: null,
+            updated_at: new Date(),
+        })
         .returning(ORDER_COLUMNS);
 
     return row ? toEntity(row) : undefined;
+}
+
+/**
+ * The order an agent is currently carrying, if any.
+ *
+ * Backed by the partial idx_orders_delivery_agent_id_status. This is the
+ * authoritative answer to "is this agent busy" — the presence hash holds a
+ * copy for the candidate scan to read cheaply, but that copy lives in Redis
+ * and is allowed to vanish, so every decision that *releases or assigns work*
+ * asks here instead.
+ *
+ * No created_at bound: an agent holds at most one active order and the
+ * partial index is tiny, so the partition fan-out is bounded by how many
+ * months have ever existed rather than by how many orders they contain.
+ */
+export async function findActiveOrderForAgent(
+    agentId: number,
+    conn: Knex,
+): Promise<OrderEntity | undefined> {
+    const row = await conn("orders")
+        .select(ORDER_COLUMNS)
+        .where("delivery_agent_id", agentId)
+        .whereIn("status", [OrderStatus.ASSIGNED, OrderStatus.PICKED])
+        .orderBy("assigned_at", "desc")
+        .first();
+
+    return row ? toEntity(row) : undefined;
+}
+
+/**
+ * GET /api/agents/tasks — one page of an agent's deliveries.
+ *
+ * Ordered and cursored by `created_at`, not `assigned_at`, which is a
+ * deliberate trade. `assigned_at` is what the agent conceptually sorts by, but
+ * `orders` is partitioned on `created_at`: ordering by anything else makes
+ * every page a fan-out across every month that exists, and no window can prune
+ * it. Within one agent's task list the two orders agree anyway — an order is
+ * assigned minutes after it is created — so the cost is nil and the saving is
+ * the whole partition set.
+ *
+ * `window` bounds the scan to recent months for the same reason.
+ */
+export async function findOrdersByAgent(
+    agentId: number,
+    params: PaginationParams,
+    filters: AgentOrderFilters,
+    window: CreatedAtWindow,
+    conn: Knex,
+): Promise<OrderEntity[]> {
+    const query = conn("orders")
+        .select(ORDER_COLUMNS)
+        .where("delivery_agent_id", agentId)
+        .where("created_at", ">=", window.from)
+        .where("created_at", "<", window.to);
+
+    if (filters.status) query.where("status", filters.status);
+    else query.whereIn("status", ACTIVE_AGENT_STATUSES);
+
+    applyCreatedAtCursor(query, params);
+
+    const rows = await query.orderBy("created_at", params.sortOrder).limit(params.limit + 1);
+    return rows.map(toEntity);
+}
+
+/**
+ * The dispatch sweep's input: `ready` orders nobody has claimed.
+ *
+ * Backed by the partial idx_orders_status_created_at, which Phase 1 created
+ * for exactly this query — it indexes only `('ready','assigned')`, so the scan
+ * never touches the millions of delivered rows beside them.
+ *
+ * Ascending by `created_at`: the order that has been waiting longest is
+ * offered first. A sweep that favoured new orders would let one unluckily
+ * placed order starve indefinitely while the queue churned around it.
+ */
+export async function findUnclaimedReadyOrders(
+    window: CreatedAtWindow,
+    limit: number,
+    conn: Knex,
+): Promise<OrderEntity[]> {
+    const rows = await conn("orders")
+        .select(ORDER_COLUMNS)
+        .where("status", OrderStatus.READY)
+        .whereNull("delivery_agent_id")
+        .where("created_at", ">=", window.from)
+        .where("created_at", "<", window.to)
+        .orderBy("created_at", "asc")
+        .limit(limit);
+
+    return rows.map(toEntity);
+}
+
+/**
+ * The restaurant + branch equality predicates shared by every scoped read.
+ * One helper rather than two inline pairs, so a read can never end up
+ * filtering by the branch and not the restaurant above it.
+ */
+function applyScope(query: Knex.QueryBuilder, scope: OrderScope | undefined): void {
+    if (!scope) return;
+
+    query.where("restaurant_id", scope.restaurantId).where("branch_id", scope.branchId);
 }
 
 /**

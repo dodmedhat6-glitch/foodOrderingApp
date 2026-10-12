@@ -71,6 +71,19 @@ export class RedisCacheProvider implements ICacheProvider {
         return removed;
     }
 
+    /**
+     * INCR, then EXPIRE only when the result is 1 — i.e. when this call is the
+     * one that created the key. Pipelined into a single round trip rather than
+     * a Lua script: the two commands are independent (the EXPIRE is decided
+     * from a value we already hold), so there is nothing here that needs
+     * atomicity beyond INCR's own.
+     */
+    async incrementWithTtl(key: string, ttlSeconds: number): Promise<number> {
+        const value = await this.client.incr(key);
+        if (value === 1) await this.client.expire(key, ttlSeconds);
+        return value;
+    }
+
     async trySet(key: string, value: string, ttlSeconds?: number): Promise<boolean> {
         const res = ttlSeconds
             ? await this.client.set(key, value, "EX", ttlSeconds, "NX")
