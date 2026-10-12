@@ -521,6 +521,7 @@ export class OrderService {
         this.publishStatusChange(written.updated, reason);
         if (written.promoted) this.publishStatusChange(written.promoted);
         await this.returnStockIfUncooked(written.updated, order);
+        await this.refundIfCancelled(written.updated, reason);
         await this.afterTransition(updated, order, reason);
 
         return OrderStatusResponseDTO.from(updated);
@@ -600,6 +601,22 @@ export class OrderService {
             items.map((item) => ({productId: item.productId, quantity: item.quantity})),
             {},
         );
+    };
+
+    /**
+     * Refunds a rejected or cancelled order's online payment, in full —
+     * whatever status it was cancelled from, unlike the stock: the customer
+     * gets no food, so they keep no charge.
+     *
+     * Awaited rather than fired and forgotten, so the refund row exists by the
+     * time the caller hears the cancellation succeeded; but it never fails the
+     * request (`PaymentService.refundCancelledOrder` logs and swallows), since
+     * the cancellation has already committed.
+     */
+    private refundIfCancelled = async (updated: OrderEntity, reason?: string): Promise<void> => {
+        if (updated.status !== OrderStatus.REJECTED && updated.status !== OrderStatus.CANCELLED) return;
+
+        await this.payments().refundCancelledOrder(updated, `order_${updated.status}: ${reason ?? ""}`);
     };
 
     /**
