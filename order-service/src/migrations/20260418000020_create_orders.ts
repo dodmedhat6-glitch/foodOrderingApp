@@ -19,7 +19,7 @@ import type {Knex} from "knex";
  *     (both rows are written in the same service transaction).
  *
  * Partition maintenance is native — no pg_partman (no Windows/PG18 build).
- * `lib/jobs/partition-maintenance.ts` pre-creates future months; this
+ * `app/order/jobs.ts` pre-creates future months; this
  * migration seeds the window around the deploy date plus a DEFAULT partition
  * so a write can never fail for want of a partition.
  */

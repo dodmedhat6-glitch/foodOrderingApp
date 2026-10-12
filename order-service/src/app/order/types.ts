@@ -1,4 +1,5 @@
 import {OrderStatus, PaymentMethod} from "./enums";
+import {CoreCallContext} from "../../lib/core-client/types";
 
 /**
  * Module-level helper shapes shared between the repo, service and controller.
@@ -93,4 +94,17 @@ export interface PricedOrderLine {
     nameSnapshot: string;
     imageUrlSnapshot: string | null;
     lineTotal: number;
+}
+
+/** The authenticated caller, as resolved from the JWT by the controller. */
+export interface OrderRequester {
+    userId: number;
+    role: string;
+    restaurantId?: number;
+    restaurantRole?: string;
+    branchIds?: number[];
+}
+
+export interface PlaceOrderContext extends CoreCallContext {
+    region: string;
 }

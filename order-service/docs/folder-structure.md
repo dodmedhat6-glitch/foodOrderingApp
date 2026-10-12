@@ -284,7 +284,7 @@ Examples in this service:
 
 Examples:
 - `lib/idempotency/idempotency.ts` — middleware that pulls the cache provider from DI.
-- `lib/jobs/presence-sweep.ts` — periodic reap of stale geo entries. The *rule* for staleness is not here and not in any service: it is the TTL on the presence store's per-member key, so nothing compares a timestamp to decide who is live.
+- `app/agent/jobs.ts` — periodic reap of stale geo entries. The *rule* for staleness is not here and not in any service: it is the TTL on the presence store's per-member key, so nothing compares a timestamp to decide who is live.
 - `lib/jobs/archival.worker.ts` — Phase 5: nightly job that copies year-old rows to the archive cluster, then deletes from hot.
 - `lib/sharding/region-resolver.ts` — Express middleware mapping requests to a region. The region is also the presence namespace, which is why an agent in `eg` is invisible to a branch in `sa` with no filtering in application code.
 - `lib/websocket/ws-server.ts` — WS server attached to the HTTP server.

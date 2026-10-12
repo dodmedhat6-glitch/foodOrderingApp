@@ -12,6 +12,9 @@ export const TOKENS = {
 
     // orders
     OrderService: Symbol.for("OrderService"),
+    OrderPlacementService: Symbol.for("OrderPlacementService"),
+    OrderDispatchService: Symbol.for("OrderDispatchService"),
+    OrderNotifier: Symbol.for("OrderNotifier"),
     OrderStatusService: Symbol.for("OrderStatusService"),
     OrderController: Symbol.for("OrderController"),
 

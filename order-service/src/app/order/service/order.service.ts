@@ -1,100 +1,47 @@
 import {container, inject, injectable} from "tsyringe";
 import {Knex} from "knex";
-import {AppError} from "../../../lib/error/AppError";
-import {ICacheProvider} from "../../../pkg/cache/cache.interface";
 import {TOKENS} from "../../../lib/di/tokens";
 import {env} from "../../../lib/config/env";
 import {logger} from "../../../lib/logger/logger";
 import {db} from "../../../lib/knex/knex";
-import {isRegion} from "../../../lib/sharding/regions";
-import {newPublicId, timestampFromUuidV7} from "../../../pkg/utils/uuid";
 import {toMs} from "../../../pkg/utils/time";
-import {getBranch, releaseStock, reserveStock} from "../../../lib/core-client/branch.client";
-import {getBranchProducts} from "../../../lib/core-client/product.client";
-import {getCustomerAddress} from "../../../lib/core-client/address.client";
-import {branchRejectingOrdersKey} from "../../../lib/core-client/cache-keys";
-import {CoreCallContext, ReserveStockItem} from "../../../lib/core-client/types";
-import {wsChannels, wsPublish} from "../../../lib/websocket/publisher";
 import {
     buildPaginationResultBy,
     PaginationMeta,
     PaginationParams,
 } from "../../../lib/http/pagination/cursor-pagination";
-import {SystemRole} from "../../../lib/auth/roles";
 import {OrderEntity} from "../entity/order.entity";
-import {OrderItemEntity} from "../entity/order-item.entity";
-import {OrderActor, OrderStatus, OrderWsEvent, PaymentMethod} from "../enums";
-import {AgentOrderFilters, OrderScope} from "../types";
+import {OrderActor, OrderStatus} from "../enums";
+import {ListOrdersFilters, OrderRequester, OrderScope, UpdateOrderStatusInput} from "../types";
 import {
-    AddressNotOwnedError,
-    BranchNotAcceptingOrdersError,
     CancellationWindowExpiredError,
     dispatchManagedTransitionError,
-    DuplicateProductInOrderError,
     OrderNotFoundError,
-    OutOfStockLine,
-    outOfStockError,
 } from "../errors";
 import {
-    claimOrderForAgent,
-    CreatedAtWindow,
-    createOrder,
-    findActiveOrderForAgent,
     findOrderByPublicId,
-    findOrdersByAgent,
     findOrdersByBranch,
     findOrdersByCustomer,
-    findUnclaimedDispatchableOrders,
     promoteClaimedReadyOrder,
-    releaseOrderFromAgent,
     updateOrderStatus,
 } from "../repository/order.repo";
-import {
-    bulkInsertItems,
-    countItemsByOrderIds,
-    findItemsByOrderIds,
-} from "../repository/order-item.repo";
-import {
-    CreateOrderItemInput,
-    ListOrdersFilters,
-    PricedOrderLine,
-    UpdateOrderStatusInput,
-} from "../types";
-import {SERVICE_FEE_MINOR} from "../constants";
-import {CreateOrderRequestDTO} from "../dto/order.request.dto";
+import {countItemsByOrderIds, findItemsByOrderIds} from "../repository/order-item.repo";
 import {
     OrderDetailResponseDTO,
-    OrderResponseDTO,
     OrderStatusResponseDTO,
     OrderSummaryResponseDTO,
-    PaymentHandoffDTO,
 } from "../dto/order.response.dto";
+import {assertCanReadOrder, resolveActor} from "../policy";
+import {releaseReservedStock} from "../stock";
+import {publicIdWindow, yearWindow} from "../windows";
 import {OrderStatusService} from "./order-status.service";
+import {OrderNotifier} from "./order-notifier.service";
 // Type-only: the payment module imports this one, and a value import here
 // would close the cycle at require() time. The instance is resolved from the
 // container at call time instead (see `payments`).
 import type {PaymentService} from "../../payment/service/payment.service";
 // Type-only for the same reason: the delivery module imports this file.
 import type {DeliveryService} from "../../delivery/service/delivery.service";
-
-/** The authenticated caller, as resolved from the JWT by the controller. */
-export interface OrderRequester {
-    userId: number;
-    role: string;
-    restaurantId?: number;
-    restaurantRole?: string;
-    branchIds?: number[];
-}
-
-export interface PlaceOrderContext extends CoreCallContext {
-    region: string;
-}
-
-// Slack on either side of the UUIDv7 timestamp when deriving the partition
-// window for a public-id lookup. The id is minted a few milliseconds before
-// created_at is stamped, and a generous margin costs at most one extra
-// partition probe while making a month-boundary straddle impossible.
-const PUBLIC_ID_WINDOW_MS = toMs(1, "m");
 
 /** `status_reason` on an order the payment-expiry sweep cancels. */
 const PAYMENT_EXPIRED_REASON = "payment_session_expired";
@@ -135,9 +82,6 @@ const DISPATCH_MANAGED_TARGETS: ReadonlySet<OrderStatus> = new Set([
     OrderStatus.READY,
 ]);
 
-/** How far back `GET /api/agents/tasks` looks when the caller names no range. */
-const AGENT_TASK_WINDOW_DAYS = 30;
-
 /**
  * Agent transitions the delivery module handles rather than this one. Both
  * carry side effects beyond the status column — a presence update, and in
@@ -148,189 +92,19 @@ const DELIVERY_OWNED_TARGETS: ReadonlySet<OrderStatus> = new Set([
     OrderStatus.DELIVERED,
 ]);
 
+/**
+ * Reads and status transitions of an existing order.
+ *
+ * Placement lives in `OrderPlacementService`, the agent/dispatch data
+ * operations in `OrderDispatchService`, and the post-commit broadcasts in
+ * `OrderNotifier`.
+ */
 @injectable()
 export class OrderService {
     constructor(
         @inject(TOKENS.OrderStatusService) private readonly statusService: OrderStatusService,
-        @inject(TOKENS.CacheProvider) private readonly cache: ICacheProvider,
+        @inject(TOKENS.OrderNotifier) private readonly notifier: OrderNotifier,
     ) {}
-
-    /**
-     * Places an order (docs/business-logic/orders.md s2).
-     *
-     * Validation reads core through the cached clients, money is computed in
-     * minor units, and the header plus its lines are written in one
-     * transaction.
-     *
-     * Stock is reserved in core *before* that transaction opens. Core's
-     * decrement is a separate database that cannot join our transaction, so
-     * one of the two has to go first and the loser needs a compensation:
-     *
-     *  - Reserve first (this): a failure to write the order leaves units held
-     *    that nobody owns, and we hand them back with `releaseStock`. The
-     *    customer sees either a placed order or an error — never a placed
-     *    order the kitchen cannot fill.
-     *  - Commit first: a failed reserve leaves a *placed* order with no stock
-     *    behind it, which can only be compensated by cancelling an order the
-     *    customer has already been told about, and which the restaurant may
-     *    have already seen on its dashboard.
-     *
-     * The second failure is worse, and it is also the likelier one — losing a
-     * race for the last unit is ordinary, whereas failing our own single-shard
-     * insert is not. Reserving first also costs nothing in lock time: the HTTP
-     * round trip happens before our transaction opens rather than inside it.
-     *
-     * The compensation is not transactional, so it must run at most once per
-     * reserve (core has no reservations ledger to match it against). Strict
-     * idempotency on this endpoint is what guarantees that — a replayed
-     * `POST /orders` is answered from the recorded response and never reaches
-     * this method.
-     */
-    placeOrder = async (
-        input: CreateOrderRequestDTO,
-        requester: OrderRequester,
-        ctx: PlaceOrderContext,
-    ): Promise<OrderResponseDTO> => {
-        const lineByProduct = new Map<number, number>();
-        for (const item of input.items) {
-            if (lineByProduct.has(item.productId)) throw DuplicateProductInOrderError;
-            lineByProduct.set(item.productId, item.quantity);
-        }
-
-        const branch = await getBranch(input.branchId, ctx);
-        await this.assertBranchAcceptsOrders(branch.id, branch);
-
-        const region = branch.countryCode.toLowerCase();
-        if (!isRegion(region)) {
-            throw new AppError(`Branch ${branch.id} is in unconfigured region "${region}"`, 503);
-        }
-        // The shard is the branch's country, so a mismatched X-Region would
-        // mean writing the order somewhere the idempotency record isn't. Fail
-        // loudly rather than silently retargeting.
-        if (ctx.region !== region) {
-            throw new AppError(`OrderRegionMismatch: branch ${branch.id} belongs to region "${region}"`, 409);
-        }
-
-        const address = await getCustomerAddress(input.customerAddressId, ctx);
-        if (address.customerId !== requester.userId) throw AddressNotOwnedError;
-
-        const lines = await this.priceLines(input.branchId, lineByProduct, ctx);
-
-        const subtotal = lines.reduce((sum, line) => sum + line.lineTotal, 0);
-        const deliveryFee = branch.deliveryFeeMinor;
-        const serviceFee = SERVICE_FEE_MINOR;
-        const total = subtotal + deliveryFee + serviceFee;
-
-        const isOnline = input.paymentMethod === PaymentMethod.ONLINE;
-        const publicId = newPublicId();
-        const conn = db(region);
-
-        // COD is in the restaurant's queue immediately; an online order isn't
-        // placed until Kashier confirms the capture (Phase 2).
-        const status = isOnline ? OrderStatus.PENDING_PAYMENT : OrderStatus.PLACED;
-
-        // Held before anything is written, so the order rows below are only
-        // ever created for units we already own.
-        const reserved = [...lineByProduct].map(([productId, quantity]) => ({productId, quantity}));
-        await this.reserveStockOrFail(branch.id, reserved, ctx);
-
-        let order: OrderEntity;
-        let items: OrderItemEntity[];
-        try {
-            const trx = await conn.transaction();
-            try {
-                order = await createOrder(
-                    {
-                        region,
-                        publicId,
-                        countryCode: branch.countryCode,
-                        restaurantId: branch.restaurantId,
-                        branchId: branch.id,
-                        customerId: requester.userId,
-                        customerAddressId: address.id,
-                        deliveryLat: address.lat,
-                        deliveryLng: address.lng,
-                        deliveryAddressTextSnapshot: address.addressText,
-                        branchNameSnapshot: branch.name,
-                        restaurantNameSnapshot: branch.restaurantName,
-                        status,
-                        subtotal,
-                        deliveryFee,
-                        serviceFee,
-                        total,
-                        currency: branch.currency,
-                        paymentMethod: input.paymentMethod,
-                        placedAt: isOnline ? null : new Date(),
-                    },
-                    trx,
-                );
-
-                items = await bulkInsertItems(order.id, lines.map(toItemInput(region)), trx);
-
-                await trx.commit();
-            } catch (err) {
-                await trx.rollback();
-                throw err;
-            }
-        } catch (err) {
-            // The units are held and no order claims them. Hand them back
-            // before surfacing the failure — the customer's retry will reserve
-            // them again, and nothing else will ever come looking for them.
-            //
-            // The outer try also covers `conn.transaction()` itself, which is
-            // where a shard that has gone away fails: that is exactly the case
-            // where units would otherwise leak until a stock audit.
-            await this.releaseReservedStock(branch.id, reserved, ctx);
-            throw err;
-        }
-
-        // Online orders stay invisible to the kitchen until payment lands.
-        if (!isOnline) {
-            this.publishCreated(order, items.length);
-            await this.invalidateBranchOrderLists(order.branchId);
-            return OrderResponseDTO.from(order, items);
-        }
-
-        return OrderResponseDTO.from(order, items, await this.openPaymentSession(order, ctx));
-    };
-
-    /**
-     * Opens the checkout session for an online order and hands the client the
-     * redirect, so placing and paying is one round trip.
-     *
-     * Best-effort by design. The order is already committed and its stock is
-     * already held; failing the whole placement because the acquirer was slow
-     * would throw away work the customer has done and leave us compensating
-     * a transaction that actually succeeded. A null `payment` block means
-     * exactly one thing to the client — call `POST /api/payments/init` — and
-     * if nobody ever does, the expiry sweep gives the stock back.
-     *
-     * The payment service is resolved from the container here rather than
-     * injected, because it injects *this* service: the webhook settles an
-     * order and the sweep cancels one, so the dependency genuinely runs both
-     * ways. Resolving the back-edge at call time is what keeps that from
-     * being a constructor cycle, and it is the same pattern the core-event
-     * handlers use (CLAUDE.md s8/Handler structure).
-     */
-    private openPaymentSession = async (
-        order: OrderEntity,
-        ctx: PlaceOrderContext,
-    ): Promise<PaymentHandoffDTO | undefined> => {
-        try {
-            const session = await this.payments().openSessionFor(order, {
-                region: ctx.region,
-                correlationId: ctx.correlationId,
-            });
-            return {sessionId: session.providerSessionId, redirectUrl: session.redirectUrl};
-        } catch (err) {
-            logger.error("order placed but payment session could not be opened", {
-                orderPublicId: order.publicId,
-                correlationId: ctx.correlationId,
-                error: (err as Error).message,
-            });
-            return undefined;
-        }
-    };
 
     private payments = (): PaymentService =>
         container.resolve<PaymentService>(TOKENS.PaymentService);
@@ -365,10 +139,9 @@ export class OrderService {
         scope?: OrderScope,
     ): Promise<OrderDetailResponseDTO> => {
         const conn = db(region);
-        const order = await findOrderByPublicId(publicId, conn, publicIdWindow(publicId), scope);
-        if (!order) throw OrderNotFoundError;
+        const order = await this.findByPublicId(publicId, conn, scope);
 
-        this.assertCanReadOrder(order, requester);
+        assertCanReadOrder(order, requester);
 
         const items = await findItemsByOrderIds([order.id], conn);
         const paymentSummary = await this.payments().summarizeForOrder(order, conn);
@@ -458,10 +231,9 @@ export class OrderService {
         scope?: OrderScope,
     ): Promise<OrderStatusResponseDTO> => {
         const conn = db(region);
-        const order = await findOrderByPublicId(publicId, conn, publicIdWindow(publicId), scope);
-        if (!order) throw OrderNotFoundError;
+        const order = await this.findByPublicId(publicId, conn, scope);
 
-        this.assertCanReadOrder(order, requester);
+        assertCanReadOrder(order, requester);
 
         // `ready` is a legal target only from `preparing`; from `assigned` it
         // is an unclaim, which has its own endpoint because it has to clear the
@@ -473,7 +245,7 @@ export class OrderService {
             throw dispatchManagedTransitionError(order.status, target);
         }
 
-        const actor = this.resolveActor(order, requester);
+        const actor = resolveActor(requester);
         this.statusService.assertReason(target, reason);
         const timestampColumn = this.statusService.assertTransition(order.status, target, actor);
 
@@ -517,9 +289,8 @@ export class OrderService {
         if (!written) throw OrderNotFoundError;
 
         const updated = written.promoted ?? written.updated;
-        await this.invalidateBranchOrderLists(updated.branchId);
-        this.publishStatusChange(written.updated, reason);
-        if (written.promoted) this.publishStatusChange(written.promoted);
+        await this.notifier.announceTransition(written.updated, reason);
+        if (written.promoted) await this.notifier.announceTransition(written.promoted);
         await this.returnStockIfUncooked(written.updated, order);
         await this.refundIfCancelled(written.updated, reason);
         await this.afterTransition(updated, order, reason);
@@ -596,7 +367,7 @@ export class OrderService {
         if (!STOCK_RETURNABLE_STATUSES.has(previous.status)) return;
 
         const items = await findItemsByOrderIds([updated.id], db(updated.region));
-        await this.releaseReservedStock(
+        await releaseReservedStock(
             updated.branchId,
             items.map((item) => ({productId: item.productId, quantity: item.quantity})),
             {},
@@ -755,150 +526,14 @@ export class OrderService {
             PAYMENT_EXPIRED_REASON,
         );
 
-        await this.releaseReservedStock(
+        await releaseReservedStock(
             order.branchId,
             items.map((item) => ({productId: item.productId, quantity: item.quantity})),
             {},
         );
 
-        await this.invalidateBranchOrderLists(cancelled.branchId);
-        this.publishStatusChange(cancelled, PAYMENT_EXPIRED_REASON);
+        await this.notifier.announceTransition(cancelled, PAYMENT_EXPIRED_REASON);
         return cancelled;
-    };
-
-    /**
-     * Announces an order that has just become visible to the restaurant.
-     *
-     * Called by the payment module after a capture commits, and by
-     * `placeOrder` for COD. Deliberately post-commit and deliberately
-     * best-effort: a broadcast is a notification about something that has
-     * already happened, and the transaction it describes is long since
-     * durable.
-     */
-    announcePlacement = async (order: OrderEntity): Promise<void> => {
-        const conn = db(order.region);
-        const [count] = await countItemsByOrderIds([order.id], conn);
-
-        this.publishCreated(order, count?.count ?? 0);
-        this.publishStatusChange(order);
-        await this.invalidateBranchOrderLists(order.branchId);
-    };
-
-    // ---------------------------------------------------------------------
-    // Dispatch surface
-    //
-    // The delivery module owns *when* an order is claimed, released or
-    // settled; this module owns the `orders` table. Cross-module reads and
-    // writes go through services, never repositories (CLAUDE.md s3), so these
-    // are the thin data operations the delivery module composes. The policy
-    // — presence checks, broadcasts, money — deliberately lives there, not
-    // here.
-    // ---------------------------------------------------------------------
-
-    /**
-     * Attempts the claim. Resolves to the updated order, or `undefined` when
-     * another agent got there first.
-     *
-     * `undefined` is an ordinary outcome, not a failure — several agents are
-     * offered the same order on purpose and all but one must lose. The
-     * conditional UPDATE underneath is what decides it (order.repo), which is
-     * why nothing here takes a lock.
-     */
-    claimForAgent = async (
-        order: OrderEntity,
-        agentId: number,
-        conn: Knex = db(order.region),
-    ): Promise<OrderEntity | undefined> => {
-        // Validated even though the UPDATE's own predicate would catch it:
-        // being the system is permission to traverse the system's edges, not
-        // licence to invent one (same rule as `transitionBySystem`). A claim
-        // on a `preparing` order moves no status, so it has no edge to check;
-        // the UPDATE may still write `ready -> assigned` if the kitchen beat
-        // it, which is the edge asserted here.
-        this.statusService.assertTransition(
-            OrderStatus.READY,
-            OrderStatus.ASSIGNED,
-            OrderActor.SYSTEM,
-        );
-        return claimOrderForAgent(order.id, order.createdAt, agentId, conn);
-    };
-
-    /**
-     * The inverse. `undefined` when the agent no longer holds it. Only an
-     * `assigned` order changes status (back to `ready`); a `preparing` one
-     * just loses its agent.
-     */
-    releaseFromAgent = async (
-        order: OrderEntity,
-        agentId: number,
-        conn: Knex = db(order.region),
-    ): Promise<OrderEntity | undefined> => {
-        if (order.status === OrderStatus.ASSIGNED) {
-            this.statusService.assertTransition(
-                OrderStatus.ASSIGNED,
-                OrderStatus.READY,
-                OrderActor.SYSTEM,
-            );
-        }
-        return releaseOrderFromAgent(order.id, order.createdAt, agentId, conn);
-    };
-
-    /**
-     * The order an agent is currently carrying, read from `orders`.
-     *
-     * Every decision that assigns or releases work asks this rather than the
-     * presence hash. The hash holds a copy so the candidate scan is cheap, but
-     * it lives in Redis and is allowed to vanish — so it answers "probably
-     * busy", and this answers "busy".
-     */
-    findActiveForAgent = async (
-        agentId: number,
-        region: string,
-    ): Promise<OrderEntity | undefined> => findActiveOrderForAgent(agentId, db(region));
-
-    /** One page of an agent's tasks, as entities for the delivery module to shape. */
-    listForAgent = async (
-        agentId: number,
-        params: PaginationParams,
-        filters: AgentOrderFilters,
-        region: string,
-    ): Promise<{data: OrderEntity[]; meta: PaginationMeta}> => {
-        const orders = await findOrdersByAgent(
-            agentId,
-            params,
-            filters,
-            recentWindow(AGENT_TASK_WINDOW_DAYS),
-            db(region),
-        );
-
-        return buildPaginationResultBy(orders, params.limit, (order) =>
-            String(order.createdAt.getTime()),
-        );
-    };
-
-    /**
-     * The dispatch sweep's input: `preparing` and `ready` orders nobody has
-     * claimed, `ready` first.
-     *
-     * Bounded to recent months because an order that has been waiting longer
-     * than the window is not waiting for an agent any more — it is a support
-     * case, and sweeping it forever would mean re-offering it forever.
-     */
-    findUnclaimedDispatchable = async (region: string, limit: number): Promise<OrderEntity[]> =>
-        findUnclaimedDispatchableOrders(recentWindow(AGENT_TASK_WINDOW_DAYS), limit, db(region));
-
-    /**
-     * The post-commit chores every dispatch transition owes: clear the
-     * branch's cached dashboard pages and tell the sockets.
-     *
-     * Exposed rather than restated in the delivery module because a transition
-     * that broadcasts differently depending on which module wrote it is a bug
-     * waiting to happen — the kitchen's view of an order must not depend on
-     * who moved it.
-     */
-    announceTransition = async (order: OrderEntity, reason?: string): Promise<void> => {
-        this.publishStatusChange(order, reason);
-        await this.invalidateBranchOrderLists(order.branchId);
     };
 
     /**
@@ -909,130 +544,7 @@ export class OrderService {
      * to disagree.
      */
     assertCanRead = (order: OrderEntity, requester: OrderRequester): void =>
-        this.assertCanReadOrder(order, requester);
-
-    /**
-     * Refuses an order when the branch, or the restaurant above it, isn't
-     * trading. The Redis flag is checked as well as the projection because
-     * `branch.deactivated` arrives as an event and must take effect
-     * immediately, not when the branch projection's TTL lapses.
-     */
-    private assertBranchAcceptsOrders = async (
-        branchId: number,
-        branch: {isActive: boolean; acceptOrders: boolean; restaurantStatus: string},
-    ): Promise<void> => {
-        const flagged = await this.cache.get(branchRejectingOrdersKey(branchId)).catch(() => null);
-        if (flagged) throw BranchNotAcceptingOrdersError;
-
-        if (!branch.isActive || !branch.acceptOrders) throw BranchNotAcceptingOrdersError;
-        if (branch.restaurantStatus !== "active") throw BranchNotAcceptingOrdersError;
-    };
-
-    /**
-     * Resolves every line's price and availability in one upstream batch call,
-     * and reports *all* offending lines at once so the customer can fix their
-     * basket in a single pass.
-     */
-    private priceLines = async (
-        branchId: number,
-        quantityByProduct: Map<number, number>,
-        ctx: CoreCallContext,
-    ): Promise<PricedOrderLine[]> => {
-        const productIds = [...quantityByProduct.keys()];
-        const products = await getBranchProducts(branchId, productIds, ctx);
-        const byId = new Map(products.map((p) => [p.id, p]));
-
-        const offending: OutOfStockLine[] = [];
-        const lines: PricedOrderLine[] = [];
-
-        for (const [productId, quantity] of quantityByProduct) {
-            const product = byId.get(productId);
-
-            // A product the branch doesn't carry, has turned off, or can't
-            // cover is reported through the same channel: from the customer's
-            // side they all mean "you can't have this right now".
-            if (!product || !product.isAvailable || product.stock < quantity) {
-                offending.push({productId, requested: quantity, available: product?.stock ?? 0});
-                continue;
-            }
-
-            lines.push({
-                productId,
-                quantity,
-                unitPriceMinor: product.unitPriceMinor,
-                nameSnapshot: product.name,
-                imageUrlSnapshot: product.imageUrl,
-                lineTotal: product.unitPriceMinor * quantity,
-            });
-        }
-
-        if (offending.length > 0) throw outOfStockError(offending);
-        return lines;
-    };
-
-    /**
-     * Holds the units this order needs, before any of it is written.
-     *
-     * Core's locked decrement is the authority on who got the last unit; the
-     * pre-check in `priceLines` against the cached product projection only
-     * exists to fail fast with a good message, and can be stale by
-     * construction. So a 409 here is an ordinary outcome, not an anomaly — and
-     * it is translated back into this module's own contract shape
-     * (docs/api-contracts.md s1.1) rather than surfacing core's envelope
-     * stringified into a message. A customer who loses the race for the last
-     * unit gets the same body as one who never had a chance at it.
-     */
-    private reserveStockOrFail = async (
-        branchId: number,
-        items: ReserveStockItem[],
-        ctx: CoreCallContext,
-    ): Promise<void> => {
-        try {
-            await reserveStock(branchId, items, ctx);
-        } catch (err) {
-            const lines = outOfStockLinesFromCoreError(err);
-            if (lines) throw outOfStockError(lines);
-            throw err;
-        }
-    };
-
-    /**
-     * Gives back units a reserve is holding for an order that was never
-     * written.
-     *
-     * Deliberately swallows its own failure and logs instead: the caller is
-     * already throwing the error the customer will see, and replacing it with
-     * "the release failed" would tell them nothing they can act on while
-     * hiding why their order didn't happen.
-     *
-     * Both failure branches are logged at `error` because both leak stock —
-     * units marked sold that nobody bought. That is an operator problem, not a
-     * customer one: it shows up as a branch that has quietly stopped selling a
-     * product. `missing` lines are core telling us the product row is gone, so
-     * the units had nowhere to return to.
-     */
-    private releaseReservedStock = async (
-        branchId: number,
-        items: ReserveStockItem[],
-        ctx: CoreCallContext,
-    ): Promise<void> => {
-        try {
-            const result = await releaseStock(branchId, items, ctx);
-            if (result.missing.length > 0) {
-                logger.error("stock release could not return every line", {
-                    branchId,
-                    missing: result.missing,
-                });
-            }
-        } catch (err) {
-            logger.error("failed to release reserved stock after a failed placement", {
-                branchId,
-                items,
-                correlationId: ctx.correlationId,
-                error: (err as Error).message,
-            });
-        }
-    };
+        assertCanReadOrder(order, requester);
 
     /** Items counts for a page of orders: one grouped query, never per row. */
     private toSummaryPage = async (
@@ -1057,174 +569,4 @@ export class OrderService {
             meta: page.meta,
         };
     };
-
-    /**
-     * Invariant 6 and 7 (docs/business-logic/orders.md s8): a customer can
-     * only read their own order even holding its public id, and a restaurant
-     * user only the branches they belong to — an owner gets the whole
-     * restaurant.
-     */
-    private assertCanReadOrder = (order: OrderEntity, requester: OrderRequester): void => {
-        if (requester.role === SystemRole.SYSTEM_ADMIN) return;
-
-        if (requester.role === SystemRole.CUSTOMER) {
-            if (order.customerId !== requester.userId) throw OrderNotFoundError;
-            return;
-        }
-
-        if (requester.role === SystemRole.RESTAURANT_USER) {
-            if (Number(requester.restaurantId) !== order.restaurantId) throw OrderNotFoundError;
-            if (requester.restaurantRole === "owner") return;
-            if (!(requester.branchIds ?? []).some((id) => Number(id) === order.branchId)) {
-                throw OrderNotFoundError;
-            }
-            return;
-        }
-
-        if (requester.role === SystemRole.DELIVERY_AGENT) {
-            if (order.deliveryAgentId !== requester.userId) throw OrderNotFoundError;
-            return;
-        }
-
-        throw OrderNotFoundError;
-    };
-
-    /**
-     * Maps the caller's system role onto the actor the status machine reasons
-     * about. 404 rather than 403 for an unknown role: by this point the
-     * caller has already been shown to have no legitimate view of the order,
-     * and confirming it exists tells them something they shouldn't learn.
-     */
-    private resolveActor = (order: OrderEntity, requester: OrderRequester): OrderActor => {
-        switch (requester.role) {
-            case SystemRole.SYSTEM_ADMIN:
-                return OrderActor.ADMIN;
-            case SystemRole.CUSTOMER:
-                return OrderActor.CUSTOMER;
-            case SystemRole.RESTAURANT_USER:
-                return OrderActor.RESTAURANT;
-            case SystemRole.DELIVERY_AGENT:
-                return OrderActor.AGENT;
-            default:
-                throw OrderNotFoundError;
-        }
-    };
-
-    /**
-     * The `order.created` broadcast — the moment an order becomes visible to
-     * the restaurant. For COD that is placement; for an online order it is
-     * the capture, which is why the payment module calls
-     * `announcePlacement` rather than inlining its own emit.
-     */
-    private publishCreated = (order: OrderEntity, itemsCount: number): void => {
-        wsPublish(
-            [wsChannels.branch(order.branchId), wsChannels.restaurant(order.restaurantId)],
-            OrderWsEvent.CREATED,
-            OrderSummaryResponseDTO.from(order, itemsCount),
-        );
-    };
-
-    private publishStatusChange = (order: OrderEntity, reason?: string): void => {
-        const channels = [
-            wsChannels.customer(order.customerId),
-            wsChannels.branch(order.branchId),
-        ];
-        if (order.deliveryAgentId) channels.push(wsChannels.agent(order.deliveryAgentId));
-
-        const ts = new Date().toISOString();
-        if (order.status === OrderStatus.CANCELLED) {
-            wsPublish(channels, OrderWsEvent.CANCELLED, {orderId: order.publicId, reason, ts});
-            return;
-        }
-        wsPublish(channels, OrderWsEvent.STATUS_CHANGED, {
-            orderId: order.publicId,
-            status: order.status,
-            ts,
-        });
-    };
-
-    /**
-     * Explicit invalidation after every transition, because the restaurant
-     * dashboard is cached and a kitchen looking at a stale queue is the exact
-     * failure the cache is supposed to be invisible for (CLAUDE.md s8/Cache).
-     */
-    private invalidateBranchOrderLists = async (branchId: number): Promise<void> => {
-        // One cached page per filter/cursor permutation, all keyed
-        // `<region>:restaurant:orders:<branchId>:...` by the route's key
-        // builder (app/order/routes.ts), so the branch's whole family goes in
-        // one pattern delete. Best-effort: a Redis failure must not fail a
-        // transition that has already committed — the 10s TTL is the backstop.
-        await this.cache.delByPattern(`*restaurant:orders:${branchId}:*`).catch(() => {});
-    };
-}
-
-function toItemInput(region: string) {
-    return (line: PricedOrderLine): CreateOrderItemInput => ({
-        region,
-        productId: line.productId,
-        quantity: line.quantity,
-        unitPriceSnapshot: line.unitPriceMinor,
-        nameSnapshot: line.nameSnapshot,
-        imageUrlSnapshot: line.imageUrlSnapshot,
-        lineTotal: line.lineTotal,
-    });
-}
-
-/**
- * Recovers the offending lines from core's `reserve-stock` 409 so the failure
- * can be re-thrown in this module's own contract shape.
- *
- * `coreUpstreamError` parks core's parsed body on `details.upstream`, and core
- * wraps every reply as `{success, data}` with `AppError.details` merged into
- * `data` — so the lines land at `upstream.data.details`. Returns undefined for
- * anything that isn't recognisably that shape, which is the signal to rethrow
- * the original error untouched rather than mislabel it as a stock problem.
- */
-function outOfStockLinesFromCoreError(err: unknown): OutOfStockLine[] | undefined {
-    if (!(err instanceof AppError) || err.statusCode !== 409) return undefined;
-
-    const data = (err.details?.upstream as {data?: {message?: string; details?: unknown}} | undefined)?.data;
-    if (data?.message !== "OutOfStock" || !Array.isArray(data.details)) return undefined;
-
-    const lines = data.details.filter(
-        (line): line is OutOfStockLine =>
-            typeof line === "object" &&
-            line !== null &&
-            typeof (line as OutOfStockLine).productId === "number",
-    );
-    return lines.length > 0 ? lines : undefined;
-}
-
-/**
- * A `created_at` window covering the last N days, for reads that have no
- * natural bound of their own (an agent's task list, the dispatch sweep).
- *
- * Without one, both queries fan out across every month partition that exists,
- * and they are the two reads that run most often — the sweep every 15 seconds
- * per region, the task list on every agent's poll.
- */
-function recentWindow(days: number): CreatedAtWindow {
-    const to = new Date(Date.now() + toMs(1, "d"));
-    return {from: new Date(Date.now() - toMs(days, "d")), to};
-}
-
-/**
- * Partition window for a public-id lookup, recovered from the UUIDv7
- * timestamp. Returns undefined for a non-v7 id, which means "scan every
- * partition" — correct, just slower, and the only way an id minted before this
- * service moved to v7 stays readable.
- */
-function publicIdWindow(publicId: string): CreatedAtWindow | undefined {
-    const minted = timestampFromUuidV7(publicId);
-    if (!minted) return undefined;
-
-    return {
-        from: new Date(minted.getTime() - PUBLIC_ID_WINDOW_MS),
-        to: new Date(minted.getTime() + PUBLIC_ID_WINDOW_MS),
-    };
-}
-
-/** Local-time year bounds, matching how `created_at` is stored. */
-function yearWindow(year: number): CreatedAtWindow {
-    return {from: new Date(year, 0, 1), to: new Date(year + 1, 0, 1)};
 }

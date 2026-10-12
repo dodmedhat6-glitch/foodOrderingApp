@@ -8,6 +8,9 @@ import {coreClient} from "../core-client/core-client";
 import {CoreProjectionService} from "../core-client/projection.service";
 import {OrderStatusService} from "../../app/order/service/order-status.service";
 import {OrderService} from "../../app/order/service/order.service";
+import {OrderPlacementService} from "../../app/order/service/order-placement.service";
+import {OrderDispatchService} from "../../app/order/service/order-dispatch.service";
+import {OrderNotifier} from "../../app/order/service/order-notifier.service";
 import {OrderController} from "../../app/order/controller/order.controller";
 import {KashierClient} from "../../pkg/payments/kashier/kashier.client";
 import {PaymentService} from "../../app/payment/service/payment.service";
@@ -43,7 +46,10 @@ container.registerSingleton<CoreProjectionService>(
 // Business modules. This is the one place lib/ is allowed to reference app/
 // (CLAUDE.md s3) — registration at boot, nowhere else.
 container.registerSingleton<OrderStatusService>(TOKENS.OrderStatusService, OrderStatusService);
+container.registerSingleton<OrderNotifier>(TOKENS.OrderNotifier, OrderNotifier);
 container.registerSingleton<OrderService>(TOKENS.OrderService, OrderService);
+container.registerSingleton<OrderPlacementService>(TOKENS.OrderPlacementService, OrderPlacementService);
+container.registerSingleton<OrderDispatchService>(TOKENS.OrderDispatchService, OrderDispatchService);
 container.registerSingleton<OrderController>(TOKENS.OrderController, OrderController);
 
 // The acquirer, behind its port. Registered as an instance because the

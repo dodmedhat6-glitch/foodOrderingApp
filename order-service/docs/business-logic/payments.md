@@ -219,7 +219,7 @@ operator via §5.
 
 ## 5a. The expiry sweep
 
-`lib/jobs/payment-expiry.ts`, every `PAYMENT_EXPIRY_SWEEP_INTERVAL_SEC`.
+`app/payment/jobs.ts`, every `PAYMENT_EXPIRY_SWEEP_INTERVAL_SEC`.
 
 Not housekeeping. An online order reserves its stock in core at placement —
 *before* the order row exists — so an abandoned checkout holds units out of

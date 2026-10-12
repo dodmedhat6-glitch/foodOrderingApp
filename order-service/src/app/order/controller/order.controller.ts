@@ -9,9 +9,10 @@ import {NotAuthenticated} from "../../../lib/auth/errors";
 import {isUuid} from "../../../pkg/utils/uuid";
 import {CreateOrderRequestDTO, UpdateOrderStatusRequestDTO} from "../dto/order.request.dto";
 import {OrderStatus} from "../enums";
-import {ListOrdersFilters, OrderScope} from "../types";
+import {ListOrdersFilters, OrderRequester, OrderScope} from "../types";
 import {TOKENS} from "../../../lib/di/tokens";
-import {OrderRequester, OrderService} from "../service/order.service";
+import {OrderService} from "../service/order.service";
+import {OrderPlacementService} from "../service/order-placement.service";
 
 const InvalidPublicId = new AppError("Invalid order id", 400);
 const InvalidScope = new AppError("Invalid restaurantId or branchId", 400);
@@ -33,12 +34,15 @@ const MIN_YEAR = 2020;
  */
 @injectable()
 export class OrderController {
-    constructor(@inject(TOKENS.OrderService) private readonly orderService: OrderService) {}
+    constructor(
+        @inject(TOKENS.OrderService) private readonly orderService: OrderService,
+        @inject(TOKENS.OrderPlacementService) private readonly placement: OrderPlacementService,
+    ) {}
 
     create = async (req: Request, res: Response, next: NextFunction) => {
         try {
             const dto = await validateBody(CreateOrderRequestDTO, req.body);
-            const order = await this.orderService.placeOrder(dto, requesterOf(req), {
+            const order = await this.placement.placeOrder(dto, requesterOf(req), {
                 region: concreteRegion(req),
                 correlationId: req.correlationId,
                 idempotencyKey: headerValue(req, "idempotency-key"),

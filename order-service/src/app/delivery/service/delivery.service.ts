@@ -11,6 +11,8 @@ import {OrderEntity} from "../../order/entity/order.entity";
 import {OrderActor, OrderStatus} from "../../order/enums";
 import {AgentOrderFilters} from "../../order/types";
 import {OrderService} from "../../order/service/order.service";
+import {OrderDispatchService} from "../../order/service/order-dispatch.service";
+import {OrderNotifier} from "../../order/service/order-notifier.service";
 import {countItemsByOrderIds} from "../../order/repository/order-item.repo";
 import {PresenceService} from "../../agent/service/presence.service";
 import {AgentService} from "../../agent/service/agent.service";
@@ -46,7 +48,7 @@ const CLAIMABLE_STATUSES: ReadonlySet<OrderStatus> = new Set([
  *
  * Holds no table of its own. A delivery is a phase of an order
  * (docs/database-design.md s3.7), so every read and write here goes through
- * `OrderService` — cross-module calls go via services, never repositories
+ * the order module's services — cross-module calls go via services, never repositories
  * (CLAUDE.md s3). What this module owns is the *policy*: who may claim, what a
  * claim costs, and what has to be true before money moves.
  */
@@ -54,6 +56,8 @@ const CLAIMABLE_STATUSES: ReadonlySet<OrderStatus> = new Set([
 export class DeliveryService {
     constructor(
         @inject(TOKENS.OrderService) private readonly orders: OrderService,
+        @inject(TOKENS.OrderDispatchService) private readonly dispatch: OrderDispatchService,
+        @inject(TOKENS.OrderNotifier) private readonly notifier: OrderNotifier,
         @inject(TOKENS.PresenceService) private readonly presence: PresenceService,
         @inject(TOKENS.AgentService) private readonly agents: AgentService,
         @inject(TOKENS.AssignmentService) private readonly assignment: AssignmentService,
@@ -83,7 +87,7 @@ export class DeliveryService {
         if (!CLAIMABLE_STATUSES.has(order.status)) throw OrderNotReadyError;
 
         if (!(await this.presence.isOnline(region, agentId))) throw NotOnlineError;
-        if (await this.orders.findActiveForAgent(agentId, region)) {
+        if (await this.dispatch.findActiveForAgent(agentId, region)) {
             throw AgentInActiveDeliveryError;
         }
 
@@ -112,7 +116,7 @@ export class DeliveryService {
         // check is the only thing that enforces it.
         if (!(await tryGetUser(agentId))) throw AgentNotFoundError;
 
-        if (await this.orders.findActiveForAgent(agentId, region)) {
+        if (await this.dispatch.findActiveForAgent(agentId, region)) {
             throw AgentInActiveDeliveryError;
         }
 
@@ -137,7 +141,7 @@ export class DeliveryService {
             throw OrderNotReadyError;
         }
 
-        const released = await this.orders.releaseFromAgent(order, agentId);
+        const released = await this.dispatch.releaseFromAgent(order, agentId);
         if (!released) throw NotYourDeliveryError;
 
         await this.presence.setActiveOrder(region, agentId, null);
@@ -146,7 +150,7 @@ export class DeliveryService {
         // hard it is to dispatch — only that this particular agent changed
         // their mind.
         await this.assignment.clearAttempts(order.publicId);
-        await this.orders.announceTransition(released);
+        await this.notifier.announceTransition(released);
 
         logger.info("order unclaimed", {orderPublicId: publicId, agentId, region});
     };
@@ -166,7 +170,7 @@ export class DeliveryService {
      * durable copy.
      */
     releaseActiveOnGoingOffline = async (agentId: number, region: string): Promise<void> => {
-        const active = await this.orders.findActiveForAgent(agentId, region);
+        const active = await this.dispatch.findActiveForAgent(agentId, region);
         if (!active) return;
 
         if (active.status === OrderStatus.PICKED) throw CannotUnclaimAfterPickupError;
@@ -189,7 +193,7 @@ export class DeliveryService {
             db(order.region),
         );
 
-        await this.orders.announceTransition(picked);
+        await this.notifier.announceTransition(picked);
         return picked;
     };
 
@@ -287,7 +291,7 @@ export class DeliveryService {
         // telling anyone, so an agent who reads the broadcast and immediately
         // asks for more work is already eligible for it.
         await this.presence.setActiveOrder(region, agentId, null);
-        await this.orders.announceTransition(delivered);
+        await this.notifier.announceTransition(delivered);
 
         logger.info("delivery settled", {
             orderPublicId: order.publicId,
@@ -307,7 +311,7 @@ export class DeliveryService {
         filters: AgentOrderFilters,
         region: string,
     ): Promise<{data: DeliveryTaskResponseDTO[]; meta: PaginationMeta}> => {
-        const page = await this.orders.listForAgent(agentId, params, filters, region);
+        const page = await this.dispatch.listForAgent(agentId, params, filters, region);
         return {data: await this.toTasks(page.data, region), meta: page.meta};
     };
 
@@ -384,7 +388,7 @@ export class DeliveryService {
         agentId: number,
         region: string,
     ): Promise<DeliveryTaskResponseDTO> => {
-        const assigned = await this.orders.claimForAgent(order, agentId);
+        const assigned = await this.dispatch.claimForAgent(order, agentId);
         if (!assigned) throw OrderAlreadyAssignedError;
 
         await this.presence.setActiveOrder(region, agentId, {
@@ -401,7 +405,7 @@ export class DeliveryService {
         // claiming it. Best-effort: if the offer list has expired they fall
         // back to the 409, which their client must handle regardless.
         await this.assignment.announceTaken(assigned.publicId, agentId);
-        await this.orders.announceTransition(assigned);
+        await this.notifier.announceTransition(assigned);
 
         logger.info("order claimed", {
             orderPublicId: assigned.publicId,

@@ -119,7 +119,7 @@ Pre-check that the claiming agent holds no other active order
 
 ### The sweep is the entry point
 
-`lib/jobs/assignment-sweep.ts`, interval `ASSIGNMENT_SWEEP_SEC` (default 15),
+`app/delivery/jobs.ts`, interval `ASSIGNMENT_SWEEP_SEC` (default 15),
 Redis lock per region. It scans `preparing` and `ready` orders with
 `delivery_agent_id IS NULL` (`ready` first, then oldest) via the partial index
 `idx_orders_status_created_at`, and offers each one.
