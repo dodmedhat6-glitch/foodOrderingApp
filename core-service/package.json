@@ -5,7 +5,8 @@
     "start": "node dist/server.js",
     "worker:dev": "tsx watch src/worker.ts",
     "worker": "node dist/worker.js",
-    "knex": "tsx ./node_modules/knex/bin/cli.js --knexfile knexfile.ts"
+    "knex": "tsx ./node_modules/knex/bin/cli.js --knexfile knexfile.ts",
+    "migrate": "tsx src/lib/knex/rename-legacy-migrations.ts && npm run knex -- migrate:latest"
   },
   "dependencies": {
     "@types/cors": "^2.8.19",

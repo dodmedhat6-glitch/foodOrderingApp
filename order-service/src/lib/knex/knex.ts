@@ -10,8 +10,9 @@ export function db(region: string): Knex {
 }
 
 /**
- * Returns the archive-cluster connection for the given region.
- * Consumed starting Phase 7.
+ * Returns the archive-cluster connection for the given region: prior-year
+ * orders and their ledger, moved there by the archival worker
+ * (app/archival/). Same schema as the hot shard.
  */
 export function dbArchive(region: string): Knex {
     return getArchiveShard(region);

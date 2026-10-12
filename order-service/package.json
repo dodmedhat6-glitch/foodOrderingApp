@@ -13,7 +13,8 @@
     "migrate:rollback": "knex --knexfile src/lib/knex/knexfile.ts migrate:rollback",
     "migrate:status": "knex --knexfile src/lib/knex/knexfile.ts migrate:status",
     "migrate:make": "knex --knexfile src/lib/knex/knexfile.ts migrate:make",
-    "migrate:all": "tsx scripts/migrate-all.ts"
+    "migrate:all": "tsx scripts/migrate-all.ts",
+    "archive:now": "tsx scripts/archive-now.ts"
   },
   "dependencies": {
     "@socket.io/redis-adapter": "^8.3.0",

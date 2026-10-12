@@ -25,7 +25,10 @@ import {AgentController} from "../../app/agent/controller/agent.controller";
 import {AssignmentService} from "../../app/delivery/service/assignment.service";
 import {DeliveryService} from "../../app/delivery/service/delivery.service";
 import {DeliveryController} from "../../app/delivery/controller/delivery.controller";
+import {LedgerService} from "../../app/payment/service/ledger.service";
 import {FinanceService} from "../../app/finance/service/finance.service";
+import {FinanceController} from "../../app/finance/controller/finance.controller";
+import {ArchivalService} from "../../app/archival/service/archival.service";
 import {env} from "../config/env";
 
 // Infrastructure
@@ -70,6 +73,7 @@ container.registerInstance<KashierClient>(
 );
 
 container.registerSingleton<PaymentService>(TOKENS.PaymentService, PaymentService);
+container.registerSingleton<LedgerService>(TOKENS.LedgerService, LedgerService);
 container.registerSingleton<PaymentWebhookService>(
     TOKENS.PaymentWebhookService,
     PaymentWebhookService,
@@ -102,8 +106,13 @@ container.registerSingleton<DeliveryService>(TOKENS.DeliveryService, DeliverySer
 container.registerSingleton<AgentController>(TOKENS.AgentController, AgentController);
 container.registerSingleton<DeliveryController>(TOKENS.DeliveryController, DeliveryController);
 
-// The restaurant's running balance. Registered now because settlement credits
-// it; the read endpoints and payouts arrive in Phase 4.
+// Restaurant finance: the running balance settlement credits, the payouts
+// that debit it, and the ledger summary behind both.
 container.registerSingleton<FinanceService>(TOKENS.FinanceService, FinanceService);
+container.registerSingleton<FinanceController>(TOKENS.FinanceController, FinanceController);
+
+// Archival: moves prior-year rows to the archive cluster. Runs in the worker
+// process only (app/archival/jobs.ts); the API never calls it.
+container.registerSingleton<ArchivalService>(TOKENS.ArchivalService, ArchivalService);
 
 export {container};

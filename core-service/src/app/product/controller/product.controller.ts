@@ -69,7 +69,9 @@ export class ProductController {
     update = async (req: Request, res: Response, next: NextFunction) => {
         try {
             const data = await validateBody(UpdateProductDTO, req.body);
-            const branchId = req.query.branchId ? Number(req.query.branchId) : undefined;
+            // Only the branch-scoped route carries a branch; there it has
+            // already passed requireBranchAccess.
+            const branchId = req.params.branchId ? Number(req.params.branchId) : undefined;
             const result = await this.productService.update(
                 Number(req.params.id),
                 req.user?.user_id!,

@@ -48,6 +48,12 @@ export interface CreateTransactionInput {
     currency: string;
     srcAccId: number | null;
     dstAccId: number | null;
+    /**
+     * The restaurant this movement belongs to. Required, not optional, so
+     * every writer has to decide: a row that silently lands with NULL here is
+     * invisible to the restaurant's payout history and finance summary.
+     */
+    restaurantId: number | null;
     refundedPaymentId?: number | null;
     idempotencyKey?: string | null;
 }
@@ -103,4 +109,32 @@ export interface OrderPaymentSummary {
     amount: number;
     currency: string;
     refundedAmount: number;
+}
+
+/** A half-open `[from, to)` window over `transactions.created_at`. */
+export interface LedgerRange {
+    from: Date;
+    to: Date;
+}
+
+/**
+ * One restaurant's ledger summed over a range, per currency. Every figure is
+ * minor units of `currency`, counting `succeeded` rows only.
+ */
+export interface RestaurantLedgerTotals {
+    currency: string;
+    grossSales: number;
+    commission: number;
+    refunds: number;
+    payouts: number;
+}
+
+/** Everything the ledger needs to record one payout. */
+export interface RecordPayoutInput {
+    region: string;
+    restaurantId: number;
+    amount: number;
+    currency: string;
+    providerReferenceId: string;
+    idempotencyKey: string;
 }

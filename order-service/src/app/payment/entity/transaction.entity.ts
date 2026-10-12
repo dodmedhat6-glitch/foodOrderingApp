@@ -22,6 +22,7 @@ export class TransactionEntity {
     currency: string;
     srcAccId: number | null;
     dstAccId: number | null;
+    restaurantId: number | null;
     isRefunded: boolean;
     refundedPaymentId: number | null;
     idempotencyKey: string | null;
@@ -42,6 +43,7 @@ export class TransactionEntity {
         this.currency = data.currency!;
         this.srcAccId = data.srcAccId ?? null;
         this.dstAccId = data.dstAccId ?? null;
+        this.restaurantId = data.restaurantId ?? null;
         this.isRefunded = data.isRefunded ?? false;
         this.refundedPaymentId = data.refundedPaymentId ?? null;
         this.idempotencyKey = data.idempotencyKey ?? null;

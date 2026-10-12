@@ -644,23 +644,28 @@ the handle is `orderPublicId`.
 
 ## 5. Restaurant Finance
 
-### 5.1 GET /api/restaurant/balance
+Restaurant-level, so nested under the restaurant only — no branch in the path
+(a balance is per `(restaurant, currency)`). Reads need `finance:read`
+(`owner`, `branch_manager`) plus membership of `:restaurantId`; system admins
+pass both. Nothing here is cached.
 
-**Auth**: `finance:read`.
+### 5.1 GET /api/restaurants/{restaurantId}/finance/balance
 
 **Response 200**
 
 ```ts
 class RestaurantBalanceResponseDTO {
   restaurantId: number;
-  balances: Array<{ currency: string; balance: number }>;
+  balances: Array<{ currency: string; balance: number; updatedAt: string }>; // empty until the first delivery settles
   asOf: string;
 }
 ```
 
-### 5.2 GET /api/restaurant/payouts?from=&to=
+### 5.2 GET /api/restaurants/{restaurantId}/finance/payouts?from=&to=&limit=&cursor=
 
-**Auth**: `finance:read`.
+`from` defaults to 90 days ago, `to` to now; `[from, to)`. Cursor-paginated,
+newest first. A range reaching into a prior year also reads the archive
+cluster (§ Phase 5 in implementation-plan.md).
 
 **Response 200**: paginated `PayoutResponseDTO[]`.
 
@@ -670,12 +675,32 @@ class PayoutResponseDTO {
   amount: number;
   currency: string;
   status: 'pending' | 'succeeded' | 'failed' | 'reversed';
-  providerReferenceId?: string;
+  providerReferenceId: string | null;
   createdAt: string;
 }
 ```
 
-### 5.3 POST /api/restaurant/payouts (admin)
+### 5.3 GET /api/restaurants/{restaurantId}/finance/summary?from=&to=
+
+`from` defaults to the start of the current month. Sums `succeeded` ledger rows
+per currency.
+
+```ts
+class FinanceSummaryResponseDTO {
+  restaurantId: number;
+  range: { from: string; to: string };
+  totals: Array<{
+    currency: string;
+    grossSales: number;  // charges + COD collections
+    commission: number;
+    refunds: number;
+    net: number;         // grossSales - commission - refunds
+    payouts: number;
+  }>;
+}
+```
+
+### 5.4 POST /api/restaurants/{restaurantId}/finance/payouts (admin)
 
 **Auth**: system_admin. **Headers**: `Idempotency-Key` (strict).
 
@@ -683,17 +708,24 @@ class PayoutResponseDTO {
 
 ```ts
 class CreatePayoutRequestDTO {
-  @IsInt() @Min(1)         restaurantId!: number;
-  @IsInt() @Min(1)         amount!: number;
-  @IsEnum(Currency)        currency!: 'EGP' | 'SAR';
-  @IsString() @MinLength(1) providerReferenceId!: string;
-  @IsOptional() @IsString() note?: string;
+  @IsInt() @Min(1)                          amount!: number;              // minor units
+  @Matches(/^[A-Z]{3}$/)                    currency!: string;
+  @IsString() @MinLength(1) @MaxLength(200) providerReferenceId!: string; // bank transfer ref
 }
 ```
 
-**Response 201**: `PayoutResponseDTO`.
+The restaurant comes from the path. The draft's `note` is not accepted — the
+ledger has nowhere to store it.
 
-**Errors**: 409 `InsufficientBalance`, 409 `IdempotencyConflict`.
+**Response 201**: `PayoutResponseDTO`. A replay of the same key returns the same
+payout, even after the HTTP idempotency record has expired (the ledger's own
+key `payout:<restaurantId>:<Idempotency-Key>` answers it).
+
+**Errors**: 409 `InsufficientBalance` (including no balance in that currency),
+409 `IdempotencyConflict` (same key, different payout).
+
+**WebSocket**: `finance.payout_recorded` on `restaurant:<id>` with
+`{ payoutId, amount, currency, balance, ts }`.
 
 ---
 

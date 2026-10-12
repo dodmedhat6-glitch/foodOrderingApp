@@ -3,7 +3,8 @@ import {Knex} from "knex";
 import {TOKENS} from "../../../lib/di/tokens";
 import {env} from "../../../lib/config/env";
 import {logger} from "../../../lib/logger/logger";
-import {db} from "../../../lib/knex/knex";
+import {db, dbArchive} from "../../../lib/knex/knex";
+import {archiveBoundary} from "../../../lib/knex/archive-boundary";
 import {toMs} from "../../../pkg/utils/time";
 import {
     buildPaginationResultBy,
@@ -12,7 +13,13 @@ import {
 } from "../../../lib/http/pagination/cursor-pagination";
 import {OrderEntity} from "../entity/order.entity";
 import {OrderActor, OrderStatus} from "../enums";
-import {ListOrdersFilters, OrderRequester, OrderScope, UpdateOrderStatusInput} from "../types";
+import {
+    ListOrdersFilters,
+    OrderRequester,
+    OrderScope,
+    SourcedOrders,
+    UpdateOrderStatusInput,
+} from "../types";
 import {
     CancellationWindowExpiredError,
     dispatchManagedTransitionError,
@@ -138,8 +145,7 @@ export class OrderService {
         requester: OrderRequester,
         scope?: OrderScope,
     ): Promise<OrderDetailResponseDTO> => {
-        const conn = db(region);
-        const order = await this.findByPublicId(publicId, conn, scope);
+        const {order, conn} = await this.findForRead(publicId, region, scope);
 
         assertCanReadOrder(order, requester);
 
@@ -181,7 +187,8 @@ export class OrderService {
     /**
      * GET /api/customer/orders?year=YYYY. The year bounds the scan to that
      * year's partitions; it defaults to the current one, which is the only
-     * year the hot database keeps (CLAUDE.md s7/Archival).
+     * year the hot database keeps (CLAUDE.md s7/Archival). A prior year reads
+     * the archive cluster as well — see `readAcross`.
      */
     listCustomerOrders = async (
         requester: OrderRequester,
@@ -189,9 +196,11 @@ export class OrderService {
         params: PaginationParams,
         year: number,
     ): Promise<{data: OrderSummaryResponseDTO[]; meta: PaginationMeta}> => {
-        const conn = db(region);
-        const orders = await findOrdersByCustomer(requester.userId, params, yearWindow(year), conn);
-        return this.toSummaryPage(orders, params, conn);
+        const window = yearWindow(year);
+        const sourced = await this.readAcross(region, window.from < archiveBoundary(), params, (conn) =>
+            findOrdersByCustomer(requester.userId, params, window, conn),
+        );
+        return this.toSummaryPage(sourced, params, region);
     };
 
     /**
@@ -208,9 +217,14 @@ export class OrderService {
         filters: ListOrdersFilters,
         region: string,
     ): Promise<{data: OrderSummaryResponseDTO[]; meta: PaginationMeta}> => {
-        const conn = db(region);
-        const orders = await findOrdersByBranch(scope, params, filters, conn);
-        return this.toSummaryPage(orders, params, conn);
+        // Only an explicit `from` before the boundary reaches the archive. The
+        // dashboard's default (no range) is the live queue, and fanning every
+        // poll of it out to a second cluster would buy nothing.
+        const reachesArchive = filters.from !== undefined && filters.from < archiveBoundary();
+        const sourced = await this.readAcross(region, reachesArchive, params, (conn) =>
+            findOrdersByBranch(scope, params, filters, conn),
+        );
+        return this.toSummaryPage(sourced, params, region);
     };
 
     /**
@@ -546,20 +560,87 @@ export class OrderService {
     assertCanRead = (order: OrderEntity, requester: OrderRequester): void =>
         assertCanReadOrder(order, requester);
 
-    /** Items counts for a page of orders: one grouped query, never per row. */
-    private toSummaryPage = async (
-        orders: OrderEntity[],
+    /**
+     * The order behind a public id for a read, wherever it lives, with the
+     * connection it was found on — the items and the ledger are read from the
+     * same cluster as the header.
+     *
+     * Hot first, always. Only a miss whose UUIDv7 says it was minted before
+     * the archive boundary goes on to the archive, so a current-year order —
+     * every tracking poll a customer makes — never costs a second cluster.
+     */
+    private findForRead = async (
+        publicId: string,
+        region: string,
+        scope?: OrderScope,
+    ): Promise<{order: OrderEntity; conn: Knex}> => {
+        const window = publicIdWindow(publicId);
+        const hot = db(region);
+        const fromHot = await findOrderByPublicId(publicId, hot, window, scope);
+        if (fromHot) return {order: fromHot, conn: hot};
+
+        if (window && window.from < archiveBoundary()) {
+            const archive = dbArchive(region);
+            const fromArchive = await findOrderByPublicId(publicId, archive, window, scope);
+            if (fromArchive) return {order: fromArchive, conn: archive};
+        }
+        throw OrderNotFoundError;
+    };
+
+    /**
+     * One page of orders from the hot shard and, when the range reaches below
+     * the archive boundary, the archive too — merged, never switched.
+     *
+     * Switching would be wrong twice over. Until the archival worker has run
+     * after New Year, last year's orders are still hot; and a crash between
+     * the archive's commit and the hot delete leaves a row in both. So both
+     * clusters are asked for the same page (same filters, same cursor, limit +
+     * 1 each), the union is de-duplicated by id — ids are minted by the hot
+     * shard's sequence and copied verbatim, so one id is one order — and the
+     * top limit + 1 of the merge is the page. That is exact: the global top
+     * N of two sorted lists is always inside the union of each list's top N.
+     */
+    private readAcross = async (
+        region: string,
+        reachesArchive: boolean,
         params: PaginationParams,
-        conn: Knex,
+        fetch: (conn: Knex) => Promise<OrderEntity[]>,
+    ): Promise<SourcedOrders> => {
+        const hotRows = await fetch(db(region));
+        if (!reachesArchive) return {orders: hotRows, archivedIds: new Set()};
+
+        const hotIds = new Set(hotRows.map((order) => order.id));
+        const archived = (await fetch(dbArchive(region))).filter((order) => !hotIds.has(order.id));
+        const direction = params.sortOrder === "asc" ? 1 : -1;
+        const orders = [...hotRows, ...archived]
+            .sort(
+                (a, b) =>
+                    direction * (a.createdAt.getTime() - b.createdAt.getTime()) || direction * (a.id - b.id),
+            )
+            .slice(0, params.limit + 1);
+
+        return {orders, archivedIds: new Set(archived.map((order) => order.id))};
+    };
+
+    /**
+     * Items counts for a page of orders: one grouped query per cluster the
+     * page came from, never per row.
+     */
+    private toSummaryPage = async (
+        sourced: SourcedOrders,
+        params: PaginationParams,
+        region: string,
     ): Promise<{data: OrderSummaryResponseDTO[]; meta: PaginationMeta}> => {
-        const page = buildPaginationResultBy(orders, params.limit, (order) =>
+        const page = buildPaginationResultBy(sourced.orders, params.limit, (order) =>
             String(order.createdAt.getTime()),
         );
 
-        const counts = await countItemsByOrderIds(
-            page.data.map((order) => order.id),
-            conn,
-        );
+        const hotIds = page.data.filter((o) => !sourced.archivedIds.has(o.id)).map((o) => o.id);
+        const archivedIds = page.data.filter((o) => sourced.archivedIds.has(o.id)).map((o) => o.id);
+        const counts = [
+            ...(await countItemsByOrderIds(hotIds, db(region))),
+            ...(archivedIds.length > 0 ? await countItemsByOrderIds(archivedIds, dbArchive(region)) : []),
+        ];
         const countByOrderId = new Map(counts.map((c) => [c.orderId, c.count]));
 
         return {
