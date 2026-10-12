@@ -10,6 +10,7 @@ import {getBranches} from "../../../lib/core-client/branch.client";
 import {BranchLookup} from "../../../lib/core-client/types";
 import {wsChannels, wsPublish} from "../../../lib/websocket/publisher";
 import {OrderEntity} from "../../order/entity/order.entity";
+import {OrderStatus} from "../../order/enums";
 import {OrderService} from "../../order/service/order.service";
 import {countItemsByOrderIds} from "../../order/repository/order-item.repo";
 import {PresenceService} from "../../agent/service/presence.service";
@@ -32,11 +33,17 @@ import {OfferOutcome} from "../types";
  * hold the pending offer. That row is what the dropped `deliveries` table
  * mostly existed for.
  *
- * **The sweep is the entry point, not a hook on the `ready` transition.** A
- * post-commit hook fires once, at the instant a human presses a button; if no
- * agent is online right then, the order would sit `ready` forever. The hook
- * only nudges this awake to keep the common case sub-second — correctness is
- * the sweep's.
+ * **Dispatch opens at `preparing`, not `ready`.** The agent's drive to the
+ * branch overlaps the cooking instead of following it, so the food waits for
+ * the courier less often than the other way round. An agent who claims early
+ * holds a `preparing` order; it becomes `assigned` when the kitchen marks it
+ * `ready` (order.service.writeReady).
+ *
+ * **The sweep is the entry point, not a hook on a transition.** A post-commit
+ * hook fires once, at the instant a human presses a button; if no agent is
+ * online right then, the order would sit unclaimed forever. The `preparing`
+ * and `ready` hooks only nudge this awake to keep the common case sub-second
+ * — correctness is the sweep's.
  */
 @injectable()
 export class AssignmentService {
@@ -47,8 +54,8 @@ export class AssignmentService {
     ) {}
 
     /**
-     * One pass over a region: find `ready` orders nobody has claimed, and
-     * offer each to its nearest candidates.
+     * One pass over a region: find `preparing` and `ready` orders nobody has
+     * claimed, and offer each to its nearest candidates.
      *
      * Branch projections for the whole batch are fetched with one `getMany`
      * (`getBranches`), not one `get` per order — a per-key cache read in a
@@ -56,7 +63,7 @@ export class AssignmentService {
      * (CLAUDE.md s8).
      */
     sweepRegion = async (region: string): Promise<OfferOutcome[]> => {
-        const orders = await this.orders.findUnclaimedReady(region, SWEEP_BATCH);
+        const orders = await this.orders.findUnclaimedDispatchable(region, SWEEP_BATCH);
         if (orders.length === 0) return [];
 
         const branches = await getBranches(orders.map((order) => order.branchId));
@@ -107,6 +114,11 @@ export class AssignmentService {
      * order someone can act on; auto-cancelling it would destroy a paid order
      * because our dispatch could not find a courier, which is our problem and
      * not the customer's.
+     *
+     * A `preparing` order never stalls. Nobody being free yet while the food
+     * is still cooking is normal, not an incident; it keeps being offered at
+     * the widest radius instead, and gets a fresh set of rounds when it
+     * reaches `ready` (DeliveryService.nudgeDispatch).
      */
     offer = async (
         order: OrderEntity,
@@ -116,7 +128,7 @@ export class AssignmentService {
         const attempt = await this.nextAttempt(order.publicId);
         const radiusMeters = this.radiusFor(attempt);
 
-        if (attempt > env.dispatch.maxAttempts) {
+        if (attempt > env.dispatch.maxAttempts && order.status !== OrderStatus.PREPARING) {
             this.publishStalled(order, attempt);
             return {
                 orderPublicId: order.publicId,

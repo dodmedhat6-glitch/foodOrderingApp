@@ -7,7 +7,7 @@ import {REGIONS} from "../sharding/regions";
 import type {AssignmentService} from "../../app/delivery/service/assignment.service";
 
 /**
- * Offers `ready` orders to nearby agents, over and over until one is claimed.
+ * Offers `preparing` and `ready` orders to nearby agents, over and over until one is claimed.
  *
  * **This is dispatch's entry point, not a hook on the `ready` transition.**
  * A post-commit hook fires exactly once, at the instant a cook presses a

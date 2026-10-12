@@ -106,7 +106,7 @@ const baseSchema = z.object({
     ASSIGNMENT_CANDIDATES: z.string().default("5"),
     // How long an offer round stands before the sweep re-offers it wider.
     ASSIGNMENT_OFFER_TTL_SEC: z.string().default("45"),
-    // How often the sweep looks for `ready` orders nobody has claimed.
+    // How often the sweep looks for `preparing`/`ready` orders nobody has claimed.
     ASSIGNMENT_SWEEP_SEC: z.string().default("15"),
     // Offer rounds before the order is declared stalled and an admin is told.
     // The order stays `ready` — a stalled order is visible, never cancelled.

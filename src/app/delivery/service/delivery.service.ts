@@ -30,6 +30,17 @@ import {
 import {AssignmentService} from "./assignment.service";
 
 /**
+ * Where an order can be claimed from. Dispatch opens when the kitchen starts,
+ * so the agent drives to the branch while the food cooks; a `preparing` claim
+ * attaches the agent and the `ready` write promotes it to `assigned`
+ * (order.service.writeReady).
+ */
+const CLAIMABLE_STATUSES: ReadonlySet<OrderStatus> = new Set([
+    OrderStatus.PREPARING,
+    OrderStatus.READY,
+]);
+
+/**
  * The delivery half of an order's life: claiming it, handing it back, carrying
  * it, and settling the money when it lands.
  *
@@ -69,7 +80,7 @@ export class DeliveryService {
         region: string,
     ): Promise<DeliveryTaskResponseDTO> => {
         const order = await this.orders.findByPublicId(publicId, db(region));
-        if (order.status !== OrderStatus.READY) throw OrderNotReadyError;
+        if (!CLAIMABLE_STATUSES.has(order.status)) throw OrderNotReadyError;
 
         if (!(await this.presence.isOnline(region, agentId))) throw NotOnlineError;
         if (await this.orders.findActiveForAgent(agentId, region)) {
@@ -94,7 +105,7 @@ export class DeliveryService {
         region: string,
     ): Promise<DeliveryTaskResponseDTO> => {
         const order = await this.orders.findByPublicId(publicId, db(region));
-        if (order.status !== OrderStatus.READY) throw OrderNotReadyError;
+        if (!CLAIMABLE_STATUSES.has(order.status)) throw OrderNotReadyError;
 
         // Confirms the agent exists in core before attaching an order to an id
         // that might be a typo. `delivery_agent_id` is a logical FK, so this
@@ -112,16 +123,19 @@ export class DeliveryService {
     /**
      * `POST /api/orders/{publicId}/unclaim` — the agent hands it back.
      *
-     * Only from `assigned`. From `picked` it is 409: the food is in the
-     * agent's bag, and recovering it is an exceptions flow that is out of
-     * scope (CLAUDE.md s13). The release is scoped to the agent who holds the
-     * order, so one agent can never free another's work.
+     * From `assigned`, or from `preparing` when the agent claimed early and
+     * changed their mind before the food came up. From `picked` it is 409: the
+     * food is in the agent's bag, and recovering it is an exceptions flow that
+     * is out of scope (CLAUDE.md s13). The release is scoped to the agent who
+     * holds the order, so one agent can never free another's work.
      */
     unclaim = async (publicId: string, agentId: number, region: string): Promise<void> => {
         const order = await this.orders.findByPublicId(publicId, db(region));
         if (order.deliveryAgentId !== agentId) throw NotYourDeliveryError;
         if (order.status === OrderStatus.PICKED) throw CannotUnclaimAfterPickupError;
-        if (order.status !== OrderStatus.ASSIGNED) throw OrderNotReadyError;
+        if (order.status !== OrderStatus.ASSIGNED && order.status !== OrderStatus.PREPARING) {
+            throw OrderNotReadyError;
+        }
 
         const released = await this.orders.releaseFromAgent(order, agentId);
         if (!released) throw NotYourDeliveryError;
@@ -316,15 +330,24 @@ export class DeliveryService {
     };
 
     /**
-     * Offers a freshly-`ready` order immediately, instead of waiting for the
-     * next sweep tick.
+     * Offers an order that has just become dispatchable — freshly `preparing`,
+     * or `ready` with nobody attached — immediately, instead of waiting for
+     * the next sweep tick.
      *
      * A convenience, not a mechanism. If this never ran, every order would
      * still be offered — just up to `ASSIGNMENT_SWEEP_SEC` later. Keeping that
      * true is what lets the whole path be best-effort: the caller swallows
      * failures here precisely because the sweep is the guarantee.
+     *
+     * Reaching `ready` unclaimed resets the offer rounds. The rounds spent
+     * while the order was cooking never counted towards a stall (see
+     * `AssignmentService.offer`), so without the reset a long prep would hand
+     * the `ready` order an already-exhausted budget and stall it on the first
+     * pass.
      */
     nudgeDispatch = async (order: OrderEntity): Promise<void> => {
+        if (order.status === OrderStatus.READY) await this.assignment.clearAttempts(order.publicId);
+
         const branch = await getBranch(order.branchId);
         const [count] = await countItemsByOrderIds([order.id], db(order.region));
         await this.assignment.offer(order, branch, count?.count ?? 0);

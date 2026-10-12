@@ -44,7 +44,8 @@ import {
     findOrdersByAgent,
     findOrdersByBranch,
     findOrdersByCustomer,
-    findUnclaimedReadyOrders,
+    findUnclaimedDispatchableOrders,
+    promoteClaimedReadyOrder,
     releaseOrderFromAgent,
     updateOrderStatus,
 } from "../repository/order.repo";
@@ -53,7 +54,12 @@ import {
     countItemsByOrderIds,
     findItemsByOrderIds,
 } from "../repository/order-item.repo";
-import {CreateOrderItemInput, ListOrdersFilters, PricedOrderLine} from "../types";
+import {
+    CreateOrderItemInput,
+    ListOrdersFilters,
+    PricedOrderLine,
+    UpdateOrderStatusInput,
+} from "../types";
 import {SERVICE_FEE_MINOR} from "../constants";
 import {CreateOrderRequestDTO} from "../dto/order.request.dto";
 import {
@@ -92,6 +98,23 @@ const PUBLIC_ID_WINDOW_MS = toMs(1, "m");
 
 /** `status_reason` on an order the payment-expiry sweep cancels. */
 const PAYMENT_EXPIRED_REASON = "payment_session_expired";
+
+/**
+ * Statuses an order can be rejected or cancelled *from* and still hand its
+ * stock back to core.
+ *
+ * Everything before the kitchen starts. Once an order is `preparing` the
+ * units have been cooked: returning them would let the branch sell food that
+ * is already in a bin or a bag, so a later cancellation keeps them sold.
+ * `pending_payment` is here for the customer cancelling their own unpaid
+ * checkout; the expiry sweep's cancellation releases through
+ * `cancelUnpaidOrder` instead.
+ */
+const STOCK_RETURNABLE_STATUSES: ReadonlySet<OrderStatus> = new Set([
+    OrderStatus.PENDING_PAYMENT,
+    OrderStatus.PLACED,
+    OrderStatus.ACCEPTED,
+]);
 
 /**
  * Targets `PATCH /status` refuses outright, whoever is asking.
@@ -478,22 +501,105 @@ export class OrderService {
             throw CancellationWindowExpiredError;
         }
 
-        const updated = await updateOrderStatus(
-            order.id,
-            order.createdAt,
-            order.status,
-            {status: target, statusReason: reason ?? null, timestampColumn},
-            conn,
-        );
+        const transitionInput = {status: target, statusReason: reason ?? null, timestampColumn};
+        const written: {updated: OrderEntity; promoted?: OrderEntity} | undefined =
+            target === OrderStatus.READY
+                ? await this.writeReady(order, transitionInput, conn)
+                : await updateOrderStatus(
+                      order.id,
+                      order.createdAt,
+                      order.status,
+                      transitionInput,
+                      conn,
+                  ).then((updated) => (updated ? {updated} : undefined));
         // Zero rows means the status moved under us between the read and the
         // write; the transition we validated is no longer the one on offer.
-        if (!updated) throw OrderNotFoundError;
+        if (!written) throw OrderNotFoundError;
 
+        const updated = written.promoted ?? written.updated;
         await this.invalidateBranchOrderLists(updated.branchId);
-        this.publishStatusChange(updated, reason);
+        this.publishStatusChange(written.updated, reason);
+        if (written.promoted) this.publishStatusChange(written.promoted);
+        await this.returnStockIfUncooked(written.updated, order);
         await this.afterTransition(updated, order, reason);
 
         return OrderStatusResponseDTO.from(updated);
+    };
+
+    /**
+     * The kitchen's `ready`, plus the promotion an early claim is owed.
+     *
+     * Dispatch starts at `preparing`, so an agent may already hold the order
+     * when the food comes up. Such an order must leave this write `assigned`,
+     * not `ready`: the sweep skips orders with an agent attached and
+     * `markPicked` needs `assigned`, so a committed `ready`-with-agent would be
+     * stranded between the two. Both writes therefore share one transaction.
+     *
+     * The decision reads the agent off the row the `ready` write *returned*,
+     * not off the order read before it. A claim that lands between that read
+     * and this write is visible here, and would otherwise be missed.
+     */
+    private writeReady = async (
+        order: OrderEntity,
+        input: UpdateOrderStatusInput,
+        conn: Knex,
+    ): Promise<{updated: OrderEntity; promoted?: OrderEntity} | undefined> => {
+        const trx = await conn.transaction();
+        try {
+            const updated = await updateOrderStatus(order.id, order.createdAt, order.status, input, trx);
+            if (!updated) {
+                await trx.rollback();
+                return undefined;
+            }
+
+            let promoted: OrderEntity | undefined;
+            if (updated.deliveryAgentId) {
+                this.statusService.assertTransition(
+                    OrderStatus.READY,
+                    OrderStatus.ASSIGNED,
+                    OrderActor.SYSTEM,
+                );
+                promoted = await promoteClaimedReadyOrder(updated.id, updated.createdAt, trx);
+                // The row was `ready` with an agent a moment ago inside this
+                // same transaction; nothing else can have moved it.
+                if (!promoted) throw OrderNotFoundError;
+            }
+
+            await trx.commit();
+            return {updated, promoted};
+        } catch (err) {
+            if (!trx.isCompleted()) await trx.rollback();
+            throw err;
+        }
+    };
+
+    /**
+     * Hands a rejected or cancelled order's units back to core, if the kitchen
+     * never started on them (`STOCK_RETURNABLE_STATUSES`).
+     *
+     * `previous.status` is the status the compare-and-set matched, so it is
+     * exactly the state the order left — not a stale read. And because only
+     * one writer can win that compare-and-set, this runs at most once per
+     * order, which `releaseStock` needs: core has no ledger to dedupe a second
+     * release against.
+     *
+     * After the commit, for the same reason `cancelUnpaidOrder` is: core cannot
+     * join our transaction, and a cancelled order whose release failed (logged
+     * loudly by `releaseReservedStock`) is the survivable side of the two.
+     */
+    private returnStockIfUncooked = async (
+        updated: OrderEntity,
+        previous: OrderEntity,
+    ): Promise<void> => {
+        if (updated.status !== OrderStatus.REJECTED && updated.status !== OrderStatus.CANCELLED) return;
+        if (!STOCK_RETURNABLE_STATUSES.has(previous.status)) return;
+
+        const items = await findItemsByOrderIds([updated.id], db(updated.region));
+        await this.releaseReservedStock(
+            updated.branchId,
+            items.map((item) => ({productId: item.productId, quantity: item.quantity})),
+            {},
+        );
     };
 
     /**
@@ -501,15 +607,17 @@ export class OrderService {
      *
      * Two cases, and both are *nudges* rather than mechanisms:
      *
-     *  - **`ready`** — tell the sweep there is work, so an order placed while
-     *    agents are already online is offered in milliseconds instead of on
+     *  - **`preparing`, or `ready` with nobody attached** — tell the sweep
+     *    there is work, so an order is offered in milliseconds instead of on
      *    the next tick. The sweep remains the thing that guarantees the offer
      *    happens; this only makes the common case fast. That is why a failure
      *    here is logged and dropped: the worst outcome is a wait of one sweep
      *    interval.
      *  - **`cancelled`** — free the agent who was carrying it and tell them to
-     *    stop driving. The order row already lost its agent in the transition;
-     *    this is the Redis side plus the courtesy.
+     *    stop driving. This is the Redis side plus the courtesy. The agent is
+     *    read off the written row first: with dispatch open from `preparing`,
+     *    a claim can land between the read and the cancellation, and the
+     *    pre-write copy would not know about it.
      *
      * Best-effort throughout. The transition has committed, and nothing here
      * can un-commit it — turning a notification failure into a 500 would tell
@@ -521,12 +629,18 @@ export class OrderService {
         reason?: string,
     ): Promise<void> => {
         try {
-            if (updated.status === OrderStatus.READY) {
+            if (
+                (updated.status === OrderStatus.PREPARING || updated.status === OrderStatus.READY) &&
+                !updated.deliveryAgentId
+            ) {
                 await this.delivery().nudgeDispatch(updated);
                 return;
             }
-            if (updated.status === OrderStatus.CANCELLED && previous.deliveryAgentId) {
-                await this.delivery().releaseOnCancellation(previous, reason);
+            if (updated.status === OrderStatus.CANCELLED) {
+                const carrier = updated.deliveryAgentId ? updated : previous;
+                if (carrier.deliveryAgentId) {
+                    await this.delivery().releaseOnCancellation(carrier, reason);
+                }
             }
         } catch (err) {
             logger.warn("post-transition dispatch hook failed", {
@@ -680,7 +794,10 @@ export class OrderService {
     ): Promise<OrderEntity | undefined> => {
         // Validated even though the UPDATE's own predicate would catch it:
         // being the system is permission to traverse the system's edges, not
-        // licence to invent one (same rule as `transitionBySystem`).
+        // licence to invent one (same rule as `transitionBySystem`). A claim
+        // on a `preparing` order moves no status, so it has no edge to check;
+        // the UPDATE may still write `ready -> assigned` if the kitchen beat
+        // it, which is the edge asserted here.
         this.statusService.assertTransition(
             OrderStatus.READY,
             OrderStatus.ASSIGNED,
@@ -689,17 +806,23 @@ export class OrderService {
         return claimOrderForAgent(order.id, order.createdAt, agentId, conn);
     };
 
-    /** The inverse. `undefined` when the agent no longer holds it. */
+    /**
+     * The inverse. `undefined` when the agent no longer holds it. Only an
+     * `assigned` order changes status (back to `ready`); a `preparing` one
+     * just loses its agent.
+     */
     releaseFromAgent = async (
         order: OrderEntity,
         agentId: number,
         conn: Knex = db(order.region),
     ): Promise<OrderEntity | undefined> => {
-        this.statusService.assertTransition(
-            OrderStatus.ASSIGNED,
-            OrderStatus.READY,
-            OrderActor.SYSTEM,
-        );
+        if (order.status === OrderStatus.ASSIGNED) {
+            this.statusService.assertTransition(
+                OrderStatus.ASSIGNED,
+                OrderStatus.READY,
+                OrderActor.SYSTEM,
+            );
+        }
         return releaseOrderFromAgent(order.id, order.createdAt, agentId, conn);
     };
 
@@ -737,14 +860,15 @@ export class OrderService {
     };
 
     /**
-     * The dispatch sweep's input: `ready` orders nobody has claimed.
+     * The dispatch sweep's input: `preparing` and `ready` orders nobody has
+     * claimed, `ready` first.
      *
      * Bounded to recent months because an order that has been waiting longer
      * than the window is not waiting for an agent any more — it is a support
      * case, and sweeping it forever would mean re-offering it forever.
      */
-    findUnclaimedReady = async (region: string, limit: number): Promise<OrderEntity[]> =>
-        findUnclaimedReadyOrders(recentWindow(AGENT_TASK_WINDOW_DAYS), limit, db(region));
+    findUnclaimedDispatchable = async (region: string, limit: number): Promise<OrderEntity[]> =>
+        findUnclaimedDispatchableOrders(recentWindow(AGENT_TASK_WINDOW_DAYS), limit, db(region));
 
     /**
      * The post-commit chores every dispatch transition owes: clear the

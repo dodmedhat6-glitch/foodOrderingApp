@@ -13,7 +13,7 @@ import {AppError} from "../../lib/error/AppError";
  */
 export const OrderAlreadyAssignedError = new AppError("OrderAlreadyAssigned", 409);
 
-/** The order is not in `ready`, so there is nothing to claim. */
+/** The order is not `preparing` or `ready`, so there is nothing to claim. */
 export const OrderNotReadyError = new AppError("OrderNotReady", 409);
 
 /** The caller is not the agent this order is assigned to. */

@@ -51,8 +51,23 @@ const ORDER_COLUMNS = [
  * What an agent's task list shows when no status filter is given: the work in
  * front of them, not their history. Delivered orders are reachable by asking
  * for them explicitly, and the month's earnings are a different endpoint.
+ *
+ * `preparing` and `ready` are here because dispatch starts in the kitchen: an
+ * agent can claim an order while it is still `preparing`, and is then holding
+ * it — driving to the branch — before it is `assigned`. `ready` with an agent
+ * attached is only ever transient (the `ready` write promotes it to `assigned`
+ * in the same transaction), but listing it costs nothing and means a crash
+ * between the two can never hide an order from the agent who holds it.
  */
-const ACTIVE_AGENT_STATUSES = [OrderStatus.ASSIGNED, OrderStatus.PICKED];
+const ACTIVE_AGENT_STATUSES = [
+    OrderStatus.PREPARING,
+    OrderStatus.READY,
+    OrderStatus.ASSIGNED,
+    OrderStatus.PICKED,
+];
+
+/** Where an order sits while dispatch is looking for an agent for it. */
+const DISPATCHABLE_STATUSES = [OrderStatus.PREPARING, OrderStatus.READY];
 
 function toEntity(row: any): OrderEntity {
     return new OrderEntity({
@@ -271,10 +286,22 @@ export async function updateOrderStatus(
  * pending offer anywhere in this service.
  *
  * An order is offered to several agents at once; they all race here. The
- * `status = 'ready' AND delivery_agent_id IS NULL` predicate means exactly one
- * UPDATE can match — Postgres serialises the row and the losers see the
- * already-written values. Zero rows affected is therefore not an error
- * condition to retry, it is the answer: somebody else won.
+ * `status IN ('preparing','ready') AND delivery_agent_id IS NULL` predicate
+ * means exactly one UPDATE can match — Postgres serialises the row and the
+ * losers see the already-written values. Zero rows affected is therefore not
+ * an error condition to retry, it is the answer: somebody else won.
+ *
+ * Claimable from `preparing` because dispatch starts in the kitchen, so the
+ * agent is driving while the food cooks. Such a claim attaches the agent and
+ * leaves the status alone — the order is not `assigned` until it is also
+ * `ready`, and `picked` stays reachable only from `assigned`. The `ready`
+ * write promotes it (`promoteClaimedReadyOrder`).
+ *
+ * The status is a CASE on the row as Postgres sees it at write time, not on
+ * what the caller read, so a claim racing the kitchen's `ready` is right in
+ * both orders: if `ready` lands first the re-checked row is `ready` and the
+ * claim writes `assigned`; if the claim lands first the `ready` write finds
+ * the agent and promotes.
  *
  * `created_at` is in the predicate for the usual two reasons — it is half the
  * primary key, and it prunes the write to one partition.
@@ -289,10 +316,13 @@ export async function claimOrderForAgent(
     const [row] = await conn("orders")
         .where("id", orderId)
         .where("created_at", createdAt)
-        .where("status", OrderStatus.READY)
+        .whereIn("status", DISPATCHABLE_STATUSES)
         .whereNull("delivery_agent_id")
         .update({
-            status: OrderStatus.ASSIGNED,
+            status: conn.raw("CASE WHEN status = ? THEN ? ELSE status END", [
+                OrderStatus.READY,
+                OrderStatus.ASSIGNED,
+            ]),
             delivery_agent_id: agentId,
             assigned_at: now,
             updated_at: now,
@@ -303,13 +333,41 @@ export async function claimOrderForAgent(
 }
 
 /**
- * The inverse: hand an `assigned` order back to the pool.
+ * The second half of an early claim: an order that reached `ready` with an
+ * agent already attached becomes `assigned`.
+ *
+ * Run inside the transaction that wrote `ready`, so `ready`-with-an-agent is
+ * never committed — it is invisible to the sweep (which skips attached
+ * orders) and to `markPicked` (which needs `assigned`), and a committed one
+ * would be stranded between them. `assigned_at` is left alone: it already
+ * holds the moment the agent claimed, which is what it means.
+ */
+export async function promoteClaimedReadyOrder(
+    orderId: number,
+    createdAt: Date,
+    conn: Knex,
+): Promise<OrderEntity | undefined> {
+    const [row] = await conn("orders")
+        .where("id", orderId)
+        .where("created_at", createdAt)
+        .where("status", OrderStatus.READY)
+        .whereNotNull("delivery_agent_id")
+        .update({status: OrderStatus.ASSIGNED, updated_at: new Date()})
+        .returning(ORDER_COLUMNS);
+
+    return row ? toEntity(row) : undefined;
+}
+
+/**
+ * The inverse of the claim: hand an order back to the pool.
  *
  * Scoped to the agent who holds it, so one agent can never unclaim another's
- * work, and to `assigned`, so a `picked` order cannot be abandoned with the
- * food already in the bag. `assigned_at` is cleared because the order is
- * genuinely unassigned again — leaving it set would make the next sweep's
- * offer look like a re-offer of a live assignment.
+ * work, and to `preparing`/`assigned`, so a `picked` order cannot be abandoned
+ * with the food already in the bag. An `assigned` order goes back to `ready`;
+ * a `preparing` one was never moved by the claim, so it stays `preparing`.
+ * `assigned_at` is cleared because the order is genuinely unassigned again —
+ * leaving it set would make the next sweep's offer look like a re-offer of a
+ * live assignment.
  */
 export async function releaseOrderFromAgent(
     orderId: number,
@@ -320,10 +378,13 @@ export async function releaseOrderFromAgent(
     const [row] = await conn("orders")
         .where("id", orderId)
         .where("created_at", createdAt)
-        .where("status", OrderStatus.ASSIGNED)
+        .whereIn("status", [OrderStatus.PREPARING, OrderStatus.ASSIGNED])
         .where("delivery_agent_id", agentId)
         .update({
-            status: OrderStatus.READY,
+            status: conn.raw("CASE WHEN status = ? THEN ? ELSE status END", [
+                OrderStatus.ASSIGNED,
+                OrderStatus.READY,
+            ]),
             delivery_agent_id: null,
             assigned_at: null,
             updated_at: new Date(),
@@ -353,7 +414,7 @@ export async function findActiveOrderForAgent(
     const row = await conn("orders")
         .select(ORDER_COLUMNS)
         .where("delivery_agent_id", agentId)
-        .whereIn("status", [OrderStatus.ASSIGNED, OrderStatus.PICKED])
+        .whereIn("status", ACTIVE_AGENT_STATUSES)
         .orderBy("assigned_at", "desc")
         .first();
 
@@ -396,28 +457,32 @@ export async function findOrdersByAgent(
 }
 
 /**
- * The dispatch sweep's input: `ready` orders nobody has claimed.
+ * The dispatch sweep's input: `preparing` and `ready` orders nobody has
+ * claimed. Dispatch starts when the kitchen does, so the agent's drive to the
+ * branch overlaps the cooking instead of following it.
  *
- * Backed by the partial idx_orders_status_created_at, which Phase 1 created
- * for exactly this query — it indexes only `('ready','assigned')`, so the scan
+ * Backed by the partial idx_orders_status_created_at, which indexes only
+ * `('preparing','ready','assigned')` (migration 20260418000130), so the scan
  * never touches the millions of delivered rows beside them.
  *
- * Ascending by `created_at`: the order that has been waiting longest is
- * offered first. A sweep that favoured new orders would let one unluckily
- * placed order starve indefinitely while the queue churned around it.
+ * `ready` first, then oldest first. Food that is already up is the order
+ * going cold, and with a batch limit a busy lunch of `preparing` orders must
+ * not be able to push it out of the pass. Within a status, the order that has
+ * been waiting longest is offered first, so no one order starves while the
+ * queue churns around it.
  */
-export async function findUnclaimedReadyOrders(
+export async function findUnclaimedDispatchableOrders(
     window: CreatedAtWindow,
     limit: number,
     conn: Knex,
 ): Promise<OrderEntity[]> {
     const rows = await conn("orders")
         .select(ORDER_COLUMNS)
-        .where("status", OrderStatus.READY)
+        .whereIn("status", DISPATCHABLE_STATUSES)
         .whereNull("delivery_agent_id")
         .where("created_at", ">=", window.from)
         .where("created_at", "<", window.to)
-        .orderBy("created_at", "asc")
+        .orderByRaw("CASE WHEN status = ? THEN 0 ELSE 1 END, created_at ASC", [OrderStatus.READY])
         .limit(limit);
 
     return rows.map(toEntity);

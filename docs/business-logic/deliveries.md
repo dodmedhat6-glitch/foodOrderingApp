@@ -2,7 +2,8 @@
 
 Owner module: `app/delivery/`
 
-Converts a `ready` order into an assigned one (dispatch), carries it through the
+Finds an agent for an order while it is still cooking (dispatch opens at
+`preparing`), carries it through the
 agent-facing transitions, and runs money settlement on `delivered`.
 
 > **There is no `deliveries` table and no `DeliveryEntity`.** A delivery is a
@@ -17,15 +18,27 @@ The delivery lifecycle is a stretch of the order status machine
 (`docs/business-logic/orders.md` §2), not a parallel one:
 
 ```
-ready ──(agent claims)──► assigned ──► picked ──► delivered (terminal)
-  ▲                           │
-  └──(unclaim / reassign)─────┘
+preparing ──(agent claims early)──► preparing + agent ──(kitchen: ready)──► assigned
+    │                                                                         ▲
+    └──(kitchen: ready, nobody claimed)──► ready ──(agent claims)─────────────┘
+
+assigned ──► picked ──► delivered (terminal)
+assigned ──(unclaim)──► ready        preparing + agent ──(unclaim)──► preparing
 ```
+
+**Dispatch opens at `preparing`, not `ready`.** The agent drives to the branch
+while the food cooks, so the food waits for the courier less often. A claim on a
+`preparing` order attaches the agent (`delivery_agent_id`, `assigned_at`) and
+leaves the status alone; the kitchen's `ready` write promotes it to `assigned`
+in the same transaction, so `ready`-with-an-agent is never committed.
+`picked` is still reachable only from `assigned` — an early agent waits at the
+counter until the food is up.
 
 | Order status | Delivery meaning                                   | Who writes          |
 | ------------ | -------------------------------------------------- | ------------------- |
-| `ready`      | Food is up; offered to agents, nobody holds it yet  | restaurant          |
-| `assigned`   | An agent claimed it; `delivery_agent_id` is set     | agent (claim)       |
+| `preparing`  | Cooking; offered to agents, may already hold one    | restaurant          |
+| `ready`      | Food is up and nobody has claimed it yet            | restaurant          |
+| `assigned`   | Food is up and an agent holds it                    | agent (claim) / system (promotion on `ready`) |
 | `picked`     | Agent confirmed pickup at the branch                | agent               |
 | `delivered`  | Handoff confirmed — triggers settlement (§5)        | agent → terminal    |
 | `cancelled`  | Order cancelled before pickup; agent released       | customer / restaurant / system |
@@ -87,8 +100,10 @@ The race is resolved by one conditional UPDATE, not by a lock:
 
 ```sql
 UPDATE orders
-SET status='assigned', delivery_agent_id=?, assigned_at=NOW(), updated_at=NOW()
-WHERE id=? AND created_at=? AND status='ready' AND delivery_agent_id IS NULL;
+SET status = CASE WHEN status='ready' THEN 'assigned' ELSE status END,
+    delivery_agent_id=?, assigned_at=NOW(), updated_at=NOW()
+WHERE id=? AND created_at=? AND status IN ('preparing','ready')
+  AND delivery_agent_id IS NULL;
 ```
 
 - 1 row → winner. Write the active order onto the agent's `presence:meta` hash
@@ -99,25 +114,30 @@ WHERE id=? AND created_at=? AND status='ready' AND delivery_agent_id IS NULL;
 - 0 rows → 409 `OrderAlreadyAssigned`. The agent's client clears the offer.
 
 Pre-check that the claiming agent holds no other active order
-(`status IN ('assigned','picked')`, backed by
+(`status IN ('preparing','ready','assigned','picked')`, backed by
 `idx_orders_delivery_agent_id_status`) → 409 `AgentInActiveDelivery`.
 
 ### The sweep is the entry point
 
 `lib/jobs/assignment-sweep.ts`, interval `ASSIGNMENT_SWEEP_SEC` (default 15),
-Redis lock per region. It scans `ready` orders with `delivery_agent_id IS NULL`
-via the partial index `idx_orders_status_created_at`, and offers each one.
+Redis lock per region. It scans `preparing` and `ready` orders with
+`delivery_agent_id IS NULL` (`ready` first, then oldest) via the partial index
+`idx_orders_status_created_at`, and offers each one.
 
-A post-commit hook on the `ready` transition fires **once**, at the moment a
-human presses a button. If no agent is online in that instant the order sits
-`ready` forever. So the `ready` transition only *nudges* the sweep awake to keep
-the common case sub-second; correctness lives in the sweep.
+A post-commit hook on a transition fires **once**, at the moment a human
+presses a button. If no agent is online in that instant the order sits
+unclaimed forever. So the `preparing` and `ready` transitions only *nudge* the
+sweep awake to keep the common case sub-second; correctness lives in the sweep.
 
 Each re-offer widens the radius by `ASSIGNMENT_RADIUS_ESCALATION` (default 2),
 capped at `ASSIGNMENT_RADIUS_MAX_METERS`. After `MAX_ASSIGNMENT_ATTEMPTS`
 (default 3, counted in `assign:attempts:<orderId>`, TTL = the order's life) the
 sweep emits `assignment.stalled` to the admin channel and leaves the order
 `ready`. A stalled order stays visible; it is never auto-cancelled.
+
+A `preparing` order never stalls — nobody being free while the food cooks is
+normal. It keeps being offered at the widest radius, and reaching `ready`
+unclaimed resets its rounds so it gets the full escalation before an alert.
 
 ---
 
