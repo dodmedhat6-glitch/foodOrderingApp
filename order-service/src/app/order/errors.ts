@@ -35,3 +35,17 @@ export function outOfStockError(details: OutOfStockLine[]): AppError {
 export function invalidStatusTransitionError(from: string, to: string): AppError {
     return new AppError("InvalidStatusTransition", 409, true, {from, to});
 }
+
+/**
+ * 409 for a transition that exists but must not be reached through
+ * `PATCH /status` — entering or leaving `assigned` moves `delivery_agent_id`
+ * and `assigned_at` too, so it belongs to /claim, /unclaim and /assign, which
+ * write every column in one UPDATE.
+ */
+export function dispatchManagedTransitionError(from: string, to: string): AppError {
+    return new AppError("DispatchManagedTransition", 409, true, {
+        from,
+        to,
+        use: "POST /api/orders/{publicId}/claim | /unclaim | /assign",
+    });
+}

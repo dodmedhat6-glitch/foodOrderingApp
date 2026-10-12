@@ -46,6 +46,20 @@ export interface BranchLookup {
     commission: number;
 }
 
+/**
+ * `GET /api/internal/users/:userId` — core's `UserLookupResponse`.
+ *
+ * Core returns exactly these three fields. There is **no phone**, which is why
+ * the agent block on a customer-facing order detail is `{ id, name }` and not
+ * the `{ id, name, phone }` an earlier draft of the contract assumed. `email`
+ * is deliberately never forwarded to a customer.
+ */
+export interface UserLookup {
+    id: number;
+    name: string;
+    email: string;
+}
+
 /** `GET /api/internal/addresses/:addressId` — core's `AddressLookupResponse`. */
 export interface AddressLookup {
     id: number;

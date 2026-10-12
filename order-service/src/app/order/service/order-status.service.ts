@@ -50,9 +50,13 @@ const TRANSITIONS: ReadonlyArray<{
         actors: [OrderActor.RESTAURANT, OrderActor.ADMIN],
     },
 
-    // `assigned` is written by the assignment service, never by a human
-    // calling PATCH /status — a manual override goes through
-    // POST /api/deliveries/assign/{orderId} (Phase 3).
+    // `assigned` is never written by PATCH /status. It is written by the
+    // claim — a conditional UPDATE that is also the arbiter of the dispatch
+    // race (order.repo.claimOrderForAgent) — and the admin override goes
+    // through POST /api/orders/{publicId}/assign. The edge is listed because
+    // the claim still validates against this table before writing: being the
+    // system is permission to traverse the system's edges, not licence to
+    // invent one.
     {from: OrderStatus.READY, to: OrderStatus.ASSIGNED, actors: [OrderActor.SYSTEM]},
     {
         from: OrderStatus.READY,
@@ -62,6 +66,26 @@ const TRANSITIONS: ReadonlyArray<{
 
     {from: OrderStatus.ASSIGNED, to: OrderStatus.PICKED, actors: [OrderActor.AGENT]},
     {from: OrderStatus.ASSIGNED, to: OrderStatus.CANCELLED, actors: [OrderActor.ADMIN]},
+    // The unclaim: an agent hands an order back, or goes offline holding one,
+    // and it returns to the pool for the next sweep to re-offer. This is the
+    // only backwards edge in the machine, and it is deliberate — the
+    // alternative is a `rejected`/`reassigned` state per attempt, which is
+    // what the dropped `deliveries` table existed to record.
+    //
+    // Only from `assigned`: once the order is `picked` the food is in the
+    // agent's bag, and handing it back is an exceptions flow, not this one.
+    //
+    // SYSTEM-only, like its mirror above, because the transition is never the
+    // whole write: `delivery_agent_id` and `assigned_at` have to be cleared in
+    // the same UPDATE. Reaching it through the generic PATCH /status would
+    // move the status and leave the agent attached, so both edges are owned by
+    // repository functions that write every column at once
+    // (claimOrderForAgent / releaseOrderFromAgent).
+    {
+        from: OrderStatus.ASSIGNED,
+        to: OrderStatus.READY,
+        actors: [OrderActor.SYSTEM],
+    },
 
     {from: OrderStatus.PICKED, to: OrderStatus.DELIVERED, actors: [OrderActor.AGENT]},
 ];

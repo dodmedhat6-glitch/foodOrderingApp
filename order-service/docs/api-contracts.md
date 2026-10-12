@@ -152,7 +152,27 @@ class OrderItemResponseDTO {
 
 **Path params**: `publicId` (UUID).
 
-**Auth**: customer (own), restaurant_user (member), system_admin.
+**Auth**: customer (own), delivery_agent (the order they carry), system_admin.
+
+Restaurant staff read the same order through the branch-scoped path in §1.2b.
+Two paths rather than one because the two are authorized by different
+questions: here the caller *is* the subject (the JWT decides), there the order
+is a tenant resource and the answer is a permission in core's catalog, which
+needs the restaurant and branch in the path so `requireRestaurantMember` and
+`requireBranchAccess` can run as middleware.
+
+---
+
+### 1.2b GET /api/restaurants/{restaurantId}/branches/{branchId}/orders/{publicId}
+
+**Path params**: `restaurantId`, `branchId` (positive integers), `publicId` (UUID).
+
+**Auth**: restaurant_user with `orders:read`, a member of `restaurantId` and of
+`branchId` (an owner passes on the restaurant alone); system_admin.
+
+Response is identical to §1.2. The scope is not only checked — it is pushed
+into the query, so the lookup filters on `(restaurant_id, branch_id, public_id)`
+and an order id belonging to a neighbouring branch returns **404**, not 403.
 
 **Response 200**
 
@@ -169,12 +189,12 @@ class OrderDetailResponseDTO extends OrderResponseDTO {
   history: Array<{ status: OrderStatus; ts: string }>;
 }
 
+// Projected from the order row itself — there is no `deliveries` table and no
+// delivery id on the wire. The order's publicId is the only handle.
 class DeliverySummaryResponseDTO {
-  id: number;
-  status: DeliveryStatus;
-  agent?: { id: number; name: string; phone?: string; lastLat?: number; lastLng?: number; lastSeenAt?: string };
-  assignedAt: string;
-  acceptedAt?: string;
+  // No phone: core's internal user lookup returns { id, name, email } and nothing more.
+  agent?: { id: number; name: string };
+  assignedAt?: string;
   pickedAt?: string;
   deliveredAt?: string;
 }
@@ -205,13 +225,23 @@ class OrderSummaryResponseDTO {
 
 ---
 
-### 1.4 GET /api/restaurant/orders
+### 1.4 GET /api/restaurants/{restaurantId}/branches/{branchId}/orders
 
-**Query**: `branchId` (required), `status?`, `from?` (ISO), `to?` (ISO), pagination, filters.
+**Path params**: `restaurantId`, `branchId` (positive integers).
 
-**Auth**: restaurant_user with `orders:read` + `requireBranchAccess('branchId')`.
+**Query**: `status?`, `from?` (ISO), `to?` (ISO), pagination, filters. The
+branch is no longer a query param — it is the path.
 
-**Response 200**: paginated `OrderSummaryResponseDTO[]`.
+**Auth**: restaurant_user with `orders:read`, a member of `restaurantId` and of
+`branchId`; system_admin.
+
+**Response 200**: paginated `OrderSummaryResponseDTO[]`, filtered on
+`(restaurant_id, branch_id)` in the query itself. A branch id that does not
+belong to `restaurantId` yields an empty page.
+
+Cached for `RESTAURANT_ORDERS_CACHE_TTL_SEC` (10s default) under
+`<region>:restaurant:orders:<branchId>:<filters>`; every status transition on
+the branch clears the whole family explicitly.
 
 ---
 
@@ -221,7 +251,10 @@ class OrderSummaryResponseDTO {
 
 **Headers**: `Idempotency-Key` (strict).
 
-**Auth**: depends on requested target — restaurant_user (with the right permission) for accept/reject/preparing/ready/cancel; customer for cancel-within-window; admin always.
+**Auth**: customer (cancel within the window on their own order),
+delivery_agent (picked/delivered on the order they carry), system_admin.
+Restaurant staff use §1.5b — this route rejects `restaurant_user` outright so
+the flat path cannot become a way around the permission check there.
 
 **Request body**
 
@@ -251,6 +284,27 @@ class OrderStatusResponseDTO {
 | ------ | ----------------------------------------------------- |
 | 409    | `{ "error": "InvalidStatusTransition", "from": "...", "to": "..." }` |
 | 409    | `{ "error": "CancellationWindowExpired" }`            |
+
+---
+
+### 1.5b PATCH /api/restaurants/{restaurantId}/branches/{branchId}/orders/{orderId}/status
+
+**Path params**: `restaurantId`, `branchId`, `orderId` (publicId).
+
+**Headers**: `Idempotency-Key` (strict).
+
+**Auth**: restaurant_user, member of both ids, holding the permission the
+**requested target** implies — `orders:accept` for `accepted`/`rejected`,
+`orders:update` for `preparing`/`ready`, `orders:cancel` for `cancelled`
+(docs/business-logic/rbac.md §3). A target outside that set is denied before
+the body is validated. system_admin bypasses.
+
+One endpoint rather than three, per CLAUDE.md §4: the permission is resolved
+from `body.status` by the `rbac()` middleware, and which transitions are
+*legal* remains the status machine's answer, not the route's.
+
+Request body and response are identical to §1.5. As in §1.2b the scope is in
+the query, so an order outside `branchId` is a 404.
 
 ---
 
@@ -334,6 +388,20 @@ which references exist.
 ---
 
 ### 2.3 GET /api/payments/{paymentId}
+
+**Auth**: system_admin only. Restaurant staff use §2.3b; an admin has no
+restaurant or branch to name and would otherwise have to guess a pair.
+
+---
+
+### 2.3b GET /api/restaurants/{restaurantId}/branches/{branchId}/payments/{paymentId}
+
+**Auth**: restaurant_user with `payments:read` (seeded onto `owner` alone),
+member of both ids. The branch travels into the order lookup behind the
+payment, so a payment on another branch's order is a 404.
+
+Response is identical to §2.3.
+
 
 **Auth**: `payments:read` (restaurant owner) or system_admin.
 
@@ -421,83 +489,109 @@ has gone through.
 
 ## 3. Deliveries
 
-### 3.1 POST /api/deliveries/assign/{orderId}
+### 3.1 POST /api/orders/{publicId}/claim
 
-**Auth**: system_admin (or system internal).
+An agent claims an order they were offered. **This is the assignment** — there is
+no separate accept step and no `deliveries` resource; the delivery is a phase of
+the order (`docs/database-design.md` §3.7).
+
+**Auth**: `delivery_agent`.
+
+**Request**: no body. The agent is the JWT subject; the order is the path.
+
+**Response 200**
+
+```ts
+class DeliveryTaskResponseDTO {
+  orderPublicId: string;
+  status: 'assigned' | 'picked' | 'delivered';
+  pickup:  { branchId: number; name: string; addressText: string; lat: number; lng: number };
+  dropoff: { addressText: string; lat: number; lng: number };
+  customer: { name: string };
+  itemsCount: number;
+  total: number;        // minor units
+  currency: string;
+  paymentMethod: 'online' | 'cod';   // cod => the agent collects `total` on handoff
+  earningEstimate: number;           // minor units
+  assignedAt: string;                // ISO 8601 UTC
+  expiresAt?: string;                // present only on a `task.offered` payload
+}
+```
+
+**Errors**
+
+| Status | Body                                                                           |
+| ------ | ------------------------------------------------------------------------------ |
+| 409    | `{ "error": "OrderAlreadyAssigned" }` — another agent won the race              |
+| 409    | `{ "error": "OrderNotReady" }` — the order is not in `ready`                    |
+| 409    | `{ "error": "AgentInActiveDelivery" }` — the agent already holds an order       |
+| 409    | `{ "error": "NotOnline" }` — the agent has no live presence row                 |
+
+The race is resolved by a conditional UPDATE, so exactly one concurrent claimer
+gets 200 and the rest get `OrderAlreadyAssigned`.
+
+---
+
+### 3.2 POST /api/orders/{publicId}/unclaim
+
+Hands an `assigned` order back; it returns to `ready` and is re-offered.
+
+**Auth**: the assigned `delivery_agent`.
+
+**Response 200**: `{ ok: true }`
+
+**Errors**
+
+| Status | Body                                                                        |
+| ------ | --------------------------------------------------------------------------- |
+| 403    | `{ "error": "NotYourDelivery" }`                                             |
+| 409    | `{ "error": "CannotUnclaimAfterPickup" }` — order is `picked`                 |
+
+---
+
+### 3.3 POST /api/orders/{publicId}/assign
+
+Admin override: force-assign an order to a named agent, bypassing the offer.
+
+**Auth**: `system_admin` (by role, not an RBAC permission — nothing new to seed in core).
 
 **Request**
 
 ```ts
 class AssignDeliveryRequestDTO {
-  @IsOptional() @IsInt() @Min(1)
-  agentId?: number;  // present → manual assignment to specific agent
+  agentId!: number;
 }
 ```
 
-**Response 201**
+**Response 200**: `DeliveryTaskResponseDTO`.
 
-```ts
-class DeliveryResponseDTO {
-  id: number;
-  orderPublicId: string;
-  agent: { id: number; name: string; phone?: string };
-  status: DeliveryStatus;
-  pickup: { lat: number; lng: number };
-  dropoff: { lat: number; lng: number };
-  distanceMeters: number | null;
-  assignedAt: string;
-}
-```
+**Errors**: as §3.1, plus `404 { "error": "AgentNotFound" }` (checked through
+`GET /api/internal/agents/:id` on core) and
+`409 { "error": "MaxAssignmentAttemptsReached" }`.
 
-**Errors**
-
-| Status | Body                                          |
-| ------ | --------------------------------------------- |
-| 409    | `{ "error": "OrderNotReady" }`                |
-| 409    | `{ "error": "OrderAlreadyHasActiveDelivery" }`|
-| 409    | `{ "error": "NoEligibleAgents" }`             |
+Idempotency: `idempotency({strict: true})` — it is an assignment, and a retried
+POST must not bounce the order between two agents.
 
 ---
 
-### 3.2 POST /api/deliveries/reassign/{orderId}
+### 3.4 Agent status transitions — use the order endpoint
 
-**Auth**: system_admin.
+`picked` and `delivered` are **order** transitions, not delivery ones. They go
+through `PATCH /api/orders/{publicId}/status` (§1.3) with the agent's JWT:
 
-**Response 201**: `DeliveryResponseDTO` (the new row).
+| From       | To          | Notes                                        |
+| ---------- | ----------- | -------------------------------------------- |
+| `assigned` | `picked`    | stamps `picked_at`                            |
+| `picked`   | `delivered` | stamps `delivered_at`, runs settlement        |
 
-**Errors**
+**Errors specific to the agent actor**
 
-| Status | Body                                              |
-| ------ | ------------------------------------------------- |
-| 409    | `{ "error": "MaxReassignmentAttemptsReached" }`   |
+| Status | Body                                      |
+| ------ | ----------------------------------------- |
+| 403    | `{ "error": "NotYourDelivery" }`           |
+| 409    | `{ "error": "InvalidStatusTransition" }`   |
 
----
-
-### 3.3 PATCH /api/deliveries/{deliveryId}/status
-
-**Auth**: delivery_agent (must own the delivery).
-
-**Request**
-
-```ts
-class UpdateDeliveryStatusRequestDTO {
-  @IsEnum(DeliveryStatus)
-  status!: 'accepted' | 'rejected' | 'picked' | 'delivered';
-
-  @IsOptional() @IsString() @MaxLength(500)
-  reason?: string;
-}
-```
-
-**Response 200**
-
-```ts
-class DeliveryStatusResponseDTO {
-  id: number;
-  status: DeliveryStatus;
-  updatedAt: string;
-}
-```
+There is no `PATCH /api/deliveries/{deliveryId}/status`.
 
 ---
 
@@ -510,9 +604,11 @@ class DeliveryStatusResponseDTO {
 **Request**
 
 ```ts
-class PresenceOnlineRequestDTO {
-  @IsNumber() lat!: number;
-  @IsNumber() lng!: number;
+// One DTO for `online` and `ping`. Bounds are validated, not assumed: a
+// transposed pair poisons the geo set and produces offers from the wrong continent.
+class PresenceRequestDTO {
+  @IsNumber() @Min(-90)  @Max(90)  lat!: number;
+  @IsNumber() @Min(-180) @Max(180) lng!: number;
 }
 ```
 
@@ -530,27 +626,19 @@ Same body as `online`. Response 200 `{ "ok": true }` or 409 `NotOnline`.
 
 **Query**: `status?`, pagination.
 
-**Response 200**: paginated `DeliveryTaskResponseDTO[]`.
+**Response 200**: paginated `DeliveryTaskResponseDTO[]` (defined in §3.1).
 
-```ts
-class DeliveryTaskResponseDTO {
-  deliveryId: number;
-  orderPublicId: string;
-  status: DeliveryStatus;
-  pickup: { branchName: string; lat: number; lng: number; addressText: string };
-  dropoff: { lat: number; lng: number; addressText: string };
-  itemsCount: number;
-  total: number;
-  currency: string;
-  paymentMethod: 'online' | 'cod';
-  earningEstimate?: number;
-  assignedAt: string;
-}
-```
+Read from `orders` where `delivery_agent_id = <jwt subject>`, cursor on
+`assigned_at DESC`, backed by the partial `idx_orders_delivery_agent_id_status`.
+`status` filters to `assigned | picked | delivered`. There is no `deliveryId` —
+the handle is `orderPublicId`.
 
 ### 4.5 GET /api/agents/earnings?from=&to=
 
-**Response 200**: `AgentEarningsResponseDTO` (see Agents.md).
+**Response 200**: `AgentEarningsResponseDTO` (see `docs/business-logic/agents.md` §4).
+
+`orderPublicId` on each row is read from the denormalized
+`agent_earnings.order_public_id`, so this endpoint never reads `orders`.
 
 ---
 
@@ -655,10 +743,14 @@ Server emits with `io.to("<room>").emit("<event.name>", payload)`. Heartbeat is 
 
 | Channel format            | Subscriber                                | Events                                                                                                                                                                |
 | ------------------------- | ----------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `customer:<userId>`       | the customer                              | `order.status_changed`, `delivery.position`, `payment.failed`, `payment.captured`                                                                                     |
+| `customer:<userId>`       | the customer                              | `order.status_changed`, `order.cancelled`, `delivery.position`, `payment.captured`, `payment.failed`, `payment.refunded`                                              |
 | `restaurant:<restId>`     | restaurant owner                          | `order.created`, `order.cancelled`                                                                                                                                    |
-| `branch:<branchId>`       | restaurant manager / staff (member)       | `order.created`, `order.status_changed`, `order.cancelled`, `delivery.assigned`                                                                                       |
-| `agent:<agentId>`         | the agent                                 | `task.assigned`, `task.cancelled`                                                                                                                                     |
+| `branch:<branchId>`       | restaurant manager / staff (member)       | `order.created`, `order.status_changed`, `order.cancelled`                                                                                                            |
+| `agent:<agentId>`         | the agent                                 | `task.offered`, `task.assigned`, `task.taken`, `task.cancelled`                                                                                                       |
+| `admin`                   | `system_admin`                            | `assignment.stalled`                                                                                                                                                  |
+
+Every event is published by the service that made the transition, immediately
+after its transaction commits. There is no separate event-wiring phase.
 
 Payload shapes for events follow the response DTOs already defined (e.g. `order.status_changed.payload === { orderPublicId, status, updatedAt }`).
 
@@ -703,9 +795,12 @@ This service does **not** emit any outbound events to anyone in this milestone.
 | `InvalidStatusTransition`         | 409  | orders        |
 | `CancellationWindowExpired`       | 409  | orders        |
 | `OrderNotReady`                   | 409  | deliveries    |
-| `OrderAlreadyHasActiveDelivery`   | 409  | deliveries    |
+| `OrderAlreadyAssigned`            | 409  | deliveries    |
+| `NotYourDelivery`                 | 403  | deliveries    |
+| `CannotUnclaimAfterPickup`        | 409  | deliveries    |
 | `NoEligibleAgents`                | 409  | deliveries    |
-| `MaxReassignmentAttemptsReached`  | 409  | deliveries    |
+| `MaxAssignmentAttemptsReached`    | 409  | deliveries    |
+| `AgentNotFound`                   | 404  | deliveries    |
 | `AgentInActiveDelivery`           | 409  | agents        |
 | `NotOnline`                       | 409  | agents        |
 | `InsufficientBalance`             | 409  | finance       |

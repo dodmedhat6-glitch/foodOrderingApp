@@ -122,7 +122,7 @@ If you find yourself importing `app/...` inside `pkg/` or `lib/`, **stop and ref
 - Columns: `snake_case`. Boolean prefixed with `is_`.
 - Primary keys: `id BIGSERIAL` (use `BIGINT` for FK columns).
 - Foreign key constraints: `fk_<child_table>_<column>` → e.g. `fk_orders_customer_id`.
-- Indexes: `idx_<table>_<col>[_<col>...]` for btree; `idx_<table>_<col>_gist` for GIST.
+- Indexes: `idx_<table>_<col>[_<col>...]` for btree; `idx_<table>_<col>_gist` for GIST. (No GIST index exists today — there is no PostGIS, and no spatial column either: agent proximity is never a SQL query. Presence lives only in Redis and the spatial index is Redis `GEO` — `GEOSEARCH ... BYRADIUS ... ASC` from the branch's coordinates, see `docs/database-design.md` §3.8 and `pkg/presence/`. The `pkg/utils/geo.ts` haversine is for *pricing* an earning at settlement, not for the dispatch search.)
 - Unique constraints: `uq_<table>_<col>[_<col>...]`.
 - Check constraints inline; enum-like columns use `TEXT NOT NULL CHECK(col IN (...))` to match the core-service pattern (avoid native PG enums except for currency, which already exists).
 - Timestamps: `created_at`, `updated_at`, `<verb>_at` (e.g. `accepted_at`, `picked_at`, `delivered_at`). All `TIMESTAMP NOT NULL` unless modelling absence (use `TIMESTAMP NULL`).
@@ -130,8 +130,31 @@ If you find yourself importing `app/...` inside `pkg/` or `lib/`, **stop and ref
 
 ### Routes
 - Plural resource nouns: `/orders`, `/payments`, `/deliveries`, `/agents`.
-- Sub-routes for relations: `/restaurants/:restaurantId/orders`.
-- `PATCH` for partial updates (single status endpoint per resource).
+- `PATCH` for partial updates (single status endpoint per resource — per
+  *audience*, see below, not per transition).
+- **Anything authorized by a permission is nested under its tenant:**
+  `/restaurants/:restaurantId/branches/:branchId/<resource>`. That is not
+  decoration — `requireRestaurantMember` and `requireBranchAccess` are
+  middleware, and middleware can only read what the path carries, so a branch
+  passed as `?branchId=` means the guard and the handler each go looking for it
+  separately and can disagree. Nesting is what lets this service reuse core's
+  RBAC middleware unchanged.
+- **Endpoints authorized by identity stay flat.** `/orders`,
+  `/customer/orders`, `/agents/*` — the subject is the JWT, there is no tenant
+  resource in the path to check, and `requireRole` plus an ownership assertion
+  in the service is the whole of it. A resource read by both audiences
+  therefore gets **two** routes onto one controller method (see
+  `app/order/routes.ts`), and the flat one must exclude `restaurant_user`
+  explicitly or it becomes a way around the permission check on the nested one.
+- **The tenant pair is a query filter, not just a guard.** A scoped read passes
+  `OrderScope` down to the repository so the `WHERE` clause carries
+  `(restaurant_id, branch_id)` alongside the order id. An id belonging to
+  another branch then matches no row rather than being fetched and rejected
+  afterwards: the same 404 to the caller, but it no longer depends on a check
+  running after the read. `app/order/repository/order.repo.ts` → `applyScope`.
+- A child router under a mount path with params needs `Router({mergeParams:
+  true})`, or `req.params` is empty inside it and both the guard and the
+  controller silently see no scope.
 
 ---
 
@@ -248,7 +271,7 @@ Swapping in `pg_partman` later means replacing the maintenance job with `create_
 
 ### Archival
 
-- Per the PRD, only the **current year**'s orders/payments are queryable from the hot DB. Older rows are moved to a **separate cold Postgres database per region** (`order_service_archive` cluster, one per region — same shard topology as the hot DB). The archival worker is implemented in this milestone — see `docs/implementation-plan.md` Phase 7.
+- Per the PRD, only the **current year**'s orders/payments are queryable from the hot DB. Older rows are moved to a **separate cold Postgres database per region** (`order_service_archive` cluster, one per region — same shard topology as the hot DB). The archival worker is implemented in this milestone — see `docs/implementation-plan.md` Phase 5.
 
 ---
 
@@ -446,7 +469,7 @@ Rules for anything that touches money here:
 
 ### WebSocket
 
-- One `ws` server per region-pinned process, mounted on the same HTTP server (`server.ts`). The server **scaffold** (server, hub, auth, publisher) lands in **Phase 0** so any module added later can publish without re-wiring infrastructure. Wiring of actual events into services happens in **Phase 6**.
+- One `ws` server per region-pinned process, mounted on the same HTTP server (`server.ts`). The server **scaffold** (server, hub, auth, publisher) lands in **Phase 0** so any module added later can publish without re-wiring infrastructure. **Every service then emits its own events inline, after the transition commits** — there is no separate event-wiring phase, and a transition that broadcasts nothing is an incomplete transition, not a deferred one.
 - Channel naming: `customer:<userId>`, `restaurant:<restaurantId>`, `branch:<branchId>`, `agent:<agentId>`.
 - Auth on connect: client passes the same access token (cookie or `?token=` query). The server verifies, then subscribes the socket to channels it is authorized for.
 - Broadcasts are produced by services after a status transition commits, published via Redis Pub/Sub so all WS workers in the region receive it.
@@ -499,7 +522,7 @@ Follow this exact order — never skip ahead:
 9. Mount in `src/routes.ts`.
 10. Smoke test the endpoint manually before moving on.
 
-Implement one module end-to-end before starting the next. Order: **orders → payments → deliveries → agents → restaurant-finance → websocket integration → archival worker**. See `docs/implementation-plan.md`.
+Implement one module end-to-end before starting the next. Order: **orders → payments → delivery+agents (one phase) → restaurant-finance → archival worker**. Delivery and agents ship together: a delivery is a phase of an order (there is no `deliveries` table — `docs/database-design.md` §3.7), and dispatch is meaningless without presence. See `docs/implementation-plan.md`.
 
 ---
 

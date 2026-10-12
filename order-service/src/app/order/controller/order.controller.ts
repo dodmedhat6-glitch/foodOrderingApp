@@ -9,12 +9,12 @@ import {NotAuthenticated} from "../../../lib/auth/errors";
 import {isUuid} from "../../../pkg/utils/uuid";
 import {CreateOrderRequestDTO, UpdateOrderStatusRequestDTO} from "../dto/order.request.dto";
 import {OrderStatus} from "../enums";
-import {ListOrdersFilters} from "../types";
+import {ListOrdersFilters, OrderScope} from "../types";
 import {TOKENS} from "../../../lib/di/tokens";
 import {OrderRequester, OrderService} from "../service/order.service";
 
 const InvalidPublicId = new AppError("Invalid order id", 400);
-const InvalidBranchId = new AppError("branchId query param is required", 400);
+const InvalidScope = new AppError("Invalid restaurantId or branchId", 400);
 const InvalidStatusFilter = new AppError("Unknown status filter", 400);
 const InvalidYear = new AppError("Invalid year", 400);
 const InvalidDateFilter = new AppError("Invalid from/to date", 400);
@@ -49,12 +49,21 @@ export class OrderController {
         }
     };
 
+    /**
+     * Serves the caller-scoped `GET /api/orders/:orderId` and the
+     * restaurant-scoped
+     * `GET /api/restaurants/:restaurantId/branches/:branchId/orders/:orderId`.
+     *
+     * One method for both: the only difference is whether the path names a
+     * branch, and `scopeParams` answers that from the params Express parsed.
+     */
     getByPublicId = async (req: Request, res: Response, next: NextFunction) => {
         try {
             const order = await this.orderService.getOrder(
                 publicIdParam(req),
                 concreteRegion(req),
                 requesterOf(req),
+                scopeParams(req),
             );
             sendSuccess(res, order);
         } catch (err) {
@@ -81,7 +90,7 @@ export class OrderController {
         try {
             const params = parsePaginationQuery(req.query as Record<string, unknown>, ["createdAt"]);
             const {data, meta} = await this.orderService.listRestaurantOrders(
-                branchIdParam(req),
+                requireScopeParams(req),
                 params,
                 listFilters(req),
                 concreteRegion(req),
@@ -101,6 +110,7 @@ export class OrderController {
                 dto.reason,
                 requesterOf(req),
                 concreteRegion(req),
+                scopeParams(req),
             );
             sendSuccess(res, result);
         } catch (err) {
@@ -132,10 +142,41 @@ function publicIdParam(req: Request): string {
     return publicId;
 }
 
-function branchIdParam(req: Request): number {
-    const branchId = Number(req.query.branchId);
-    if (!Number.isInteger(branchId) || branchId <= 0) throw InvalidBranchId;
-    return branchId;
+/**
+ * The restaurant/branch pair from the path, or `undefined` on the routes that
+ * don't carry one.
+ *
+ * Absent and malformed are kept apart deliberately: a route mounted outside
+ * `/restaurants/:restaurantId/branches/:branchId` has no scope to read and the
+ * service falls back to caller-based authorisation, whereas a route that *does*
+ * carry the segments and parsed them to nonsense is a 400. Collapsing the two
+ * would silently widen a scoped read to an unscoped one.
+ */
+function scopeParams(req: Request): OrderScope | undefined {
+    const restaurantId = req.params.restaurantId;
+    const branchId = req.params.branchId;
+    if (restaurantId === undefined && branchId === undefined) return undefined;
+
+    return requireScopeParams(req);
+}
+
+function requireScopeParams(req: Request): OrderScope {
+    const restaurantId = positiveIntParam(req.params.restaurantId);
+    const branchId = positiveIntParam(req.params.branchId);
+    if (restaurantId === undefined || branchId === undefined) throw InvalidScope;
+
+    return {restaurantId, branchId};
+}
+
+/**
+ * Express 5 types a repeated param as an array; only the single-value form is
+ * an id, so anything else reads as absent rather than being coerced.
+ */
+function positiveIntParam(raw: string | string[] | undefined): number | undefined {
+    if (typeof raw !== "string") return undefined;
+
+    const id = Number(raw);
+    return Number.isInteger(id) && id > 0 ? id : undefined;
 }
 
 function yearParam(req: Request): number {

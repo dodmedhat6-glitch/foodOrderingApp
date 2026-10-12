@@ -60,6 +60,64 @@ export async function cacheBranch(branch: BranchLookup): Promise<void> {
 }
 
 /**
+ * Several branch projections in **one** Redis round trip, fetching only the
+ * misses from core.
+ *
+ * The dispatch sweep handles a batch of `ready` orders at a time and needs
+ * each one's branch coordinates. Calling `getBranch` in a loop would be N
+ * sequential `get`s against a remote Redis — N network latencies, which is
+ * exactly the mistake that makes a granular cache lose to a single upstream
+ * call, and the read-side twin of an N+1 query (CLAUDE.md s8).
+ *
+ * Misses go to core one at a time: core has no batch branch endpoint, and
+ * adding one to serve a cache miss on a sweep would be optimising the rare
+ * path. In steady state the branches of the orders being swept are the
+ * branches that just took those orders, so they are already warm.
+ *
+ * Returns a Map rather than an array so callers index by id without assuming
+ * the order came back in the order they asked.
+ */
+export async function getBranches(
+    branchIds: number[],
+    ctx: CoreCallContext = {},
+): Promise<Map<number, BranchLookup>> {
+    const unique = [...new Set(branchIds)];
+    const found = new Map<number, BranchLookup>();
+    if (unique.length === 0) return found;
+
+    const keys = unique.map(branchKey);
+    const cached = await cacheProvider.getMany(keys).catch(() => keys.map(() => null));
+
+    const missing: number[] = [];
+    cached.forEach((value, index) => {
+        const parsed = value ? parseBranch(value) : null;
+        if (parsed) found.set(parsed.id, parsed);
+        else missing.push(unique[index]);
+    });
+
+    for (const branchId of missing) {
+        try {
+            found.set(branchId, await getBranch(branchId, ctx));
+        } catch {
+            // One unreachable branch must not fail the whole batch. The caller
+            // skips the orders it could not locate and the next sweep retries
+            // them — an order with no branch projection is undispatchable, not
+            // lost.
+        }
+    }
+
+    return found;
+}
+
+function parseBranch(raw: string): BranchLookup | null {
+    try {
+        return JSON.parse(raw) as BranchLookup;
+    } catch {
+        return null;
+    }
+}
+
+/**
  * Atomically decrements branch stock for every line, in one core-side
  * transaction. Core returns 409 with the offending lines if any line would
  * underflow, which is the real guard against two customers racing the last

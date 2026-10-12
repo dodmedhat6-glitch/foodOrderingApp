@@ -23,7 +23,7 @@ The system context (see `img.png`, `img_1.png`):
                        │
                        └────► Kashier (payment provider, sync init + async webhook)
 
-       Postgres archive cluster (sharded per country, cold) — populated by Phase 7 archival worker
+       Postgres archive cluster (sharded per country, cold) — populated by Phase 5 archival worker
 
 (future) Analytics service — out of scope
 ```
@@ -115,7 +115,7 @@ This is the same pattern as `core-service`'s `withCache`, but for cross-service 
 ### Layer B — Endpoint cache (`withCache` middleware)
 
 Same as core. Used for:
-- `GET /restaurant/orders?branchId=&status=pending` (per-branch, 10s TTL — pending orders churn fast but the polling rate is high).
+- `GET /restaurants/{rid}/branches/{bid}/orders?status=pending` (per-branch, 10s TTL — pending orders churn fast but the polling rate is high). The cache key is built from the path's `branchId` so the service can clear a branch's whole family of pages with one pattern delete.
 - `GET /agents/tasks?status=` (per-agent, 5s TTL).
 
 For these, we **also** publish via WebSocket on state change so clients don't actually rely on polling — but the cache absorbs misbehaving clients.
@@ -369,7 +369,7 @@ The unique on `transactions.idempotency_key` and the partial uniques on webhook 
 
 PRD §9: only the **current year** of orders is queryable from hot DB; older lives in cold storage.
 
-Plan (Phase 7 in the implementation plan):
+Plan (Phase 5 in the implementation plan):
 1. A **separate Postgres archive cluster per region** (`order_service_archive`) runs the same schema as the hot DB.
 2. A nightly archival worker per region copies rows older than the current year into the archive cluster (in batches), validates the copy, then deletes from hot.
 3. The customer/restaurant API gates by `year=YYYY` — current year hits hot DB, older hits the archive cluster (the same `region` shard router resolves which connection to use, with a `cluster='archive'|'hot'` flag).

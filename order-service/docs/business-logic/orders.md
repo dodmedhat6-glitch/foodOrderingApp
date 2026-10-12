@@ -119,7 +119,25 @@ The simplest UX is to keep `POST /orders` and `POST /payments/init` as **two sep
 
 ---
 
-## 4. GET /orders/{orderId}
+## 4. GET /orders/{orderId} and GET /restaurants/{restaurantId}/branches/{branchId}/orders/{orderId}
+
+The same read under two paths, because the two audiences are authorized by
+different questions:
+
+- **Flat** — customer (own), delivery_agent (the one they carry), admin. The
+  subject is the JWT, so there is nothing in the path to authorize against and
+  the ownership check in the service is the whole of it.
+- **Branch-scoped** — restaurant staff. The order is a tenant resource and the
+  answer is `orders:read` from core's catalog, so the tenancy goes in the path
+  where `requireRestaurantMember` and `requireBranchAccess` can read it as
+  middleware, exactly as in `core-service`.
+
+The scoped path does not merely *check* the pair — it carries it into the
+repository, so the lookup filters on `(restaurant_id, branch_id, public_id)`.
+An order id from a neighbouring branch of the same restaurant therefore matches
+no row at all, instead of being fetched and then rejected. Same answer to the
+caller (404), stronger guarantee: it no longer depends on remembering to run a
+check after the read.
 
 - `orderId` here is the **public_id** (UUID).
 - Lookup is by `public_id` index, single shard.
@@ -139,24 +157,41 @@ The simplest UX is to keep `POST /orders` and `POST /payments/init` as **two sep
 - Cursor-paginated.
 - Defaults `year` to the current year if omitted.
 - For current year → query `orders` on customer's home shard via `idx_orders_customer_id_created_at`.
-- For historical years → route to the **archive cluster** (Phase 7) for the same region. Same indexes, same shape.
+- For historical years → route to the **archive cluster** (Phase 5) for the same region. Same indexes, same shape.
 - Cross-country lookup is not optimized for in this milestone (extremely rare).
 
 ---
 
-## 6. GET /restaurant/orders
+## 6. GET /restaurants/{restaurantId}/branches/{branchId}/orders
 
-- Filters: `branchId`, `status`, `from`, `to`.
+- The branch is a **path segment**, not a query param: it is what the
+  authorization middleware checks, and a value two different layers each have
+  to go looking for in the query string is a value they can disagree about.
+- Filters: `status`, `from`, `to`.
 - Cursor pagination (`createdAt` desc).
-- Authorization: `requireRestaurantMember(restaurantId)` + `requireBranchAccess(branchId)`.
+- Authorization: `requireRestaurantMember("restaurantId")` +
+  `requireBranchAccess("branchId")` + `rbac({orders:read})`.
+- The query filters on `(restaurant_id, branch_id)`, so a branch that does not
+  belong to the restaurant in the path returns an empty page rather than
+  another tenant's queue.
 - Hot endpoint → backed by `idx_orders_branch_status_created_at` + `withCache(10)` for the typical "pending in this branch" page.
 - Cache invalidated on every status transition for that branch (the service clears `restaurant:orders:<branchId>:*`).
 
 ---
 
-## 7. PATCH /orders/{orderId}/status
+## 7. PATCH /orders/{orderId}/status (and the branch-scoped copy)
 
-- Single endpoint. The server inspects `currentStatus` and the actor's role to decide if the requested transition is allowed.
+- Still **one endpoint per audience**, not one per transition (CLAUDE.md §4).
+  Restaurant staff go through
+  `PATCH /restaurants/{restaurantId}/branches/{branchId}/orders/{orderId}/status`;
+  customers and agents through the flat path, which rejects `restaurant_user`
+  so it cannot become a way around the permission check.
+- On the scoped route the required permission is derived from the **requested
+  target** (`orders:accept` / `orders:update` / `orders:cancel` — §11), because
+  core's catalog splits a restaurant's order rights three ways and `staff` holds
+  only two of them. The derivation happens in `rbac()` before anything is
+  written; which transitions are *legal* is still the status machine's answer.
+- The server inspects `currentStatus` and the actor's role to decide if the requested transition is allowed.
 - Each transition uses a small helper `assertTransition(from, to, actorContext)` that throws `InvalidStatusTransition` otherwise.
 - Side effects per transition:
   - `accepted` → stamp `accepted_at`; WS to customer.
@@ -177,6 +212,8 @@ The simplest UX is to keep `POST /orders` and `POST /payments/init` as **two sep
 5. `pending_payment` orders older than 15 min are cancelled by a background sweep.
 6. A customer cannot read another customer's order, even with the public_id.
 7. A restaurant user cannot read orders for branches they aren't a member of (unless owner).
+8. A branch-scoped read never returns a row outside `(restaurant_id, branch_id)`
+   — the pair is in the `WHERE` clause, not only in a guard.
 
 ---
 
@@ -200,12 +237,17 @@ The simplest UX is to keep `POST /orders` and `POST /payments/init` as **two sep
 | Action                                      | Roles allowed                                                     |
 | ------------------------------------------- | ------------------------------------------------------------------ |
 | `POST /orders`                              | `customer`                                                         |
-| `GET /orders/{id}`                          | `customer` (own), `restaurant_user` (member of branch), `system_admin` |
+| `GET /orders/{id}`                          | `customer` (own), `delivery_agent` (own), `system_admin`           |
 | `GET /customer/orders`                      | `customer`                                                         |
-| `GET /restaurant/orders`                    | `restaurant_user` (`orders:read`), `system_admin`                  |
-| `PATCH /orders/{id}/status` → accept/reject | `restaurant_user` with `orders:accept`                             |
-| `PATCH /orders/{id}/status` → preparing/ready | `restaurant_user` with `orders:update`                           |
-| `PATCH /orders/{id}/status` → cancelled     | `customer` (own, window), `restaurant_user` (`orders:cancel`), `system_admin` |
+| `PATCH /orders/{id}/status` → cancelled     | `customer` (own, inside window), `system_admin`                    |
+| `PATCH /orders/{id}/status` → picked/delivered | `delivery_agent` (the assigned one)                             |
+| `GET R/B/orders`                            | `restaurant_user` (`orders:read`), `system_admin`                  |
+| `GET R/B/orders/{id}`                       | `restaurant_user` (`orders:read`), `system_admin`                  |
+| `PATCH R/B/orders/{id}/status` → accept/reject | `restaurant_user` with `orders:accept`                          |
+| `PATCH R/B/orders/{id}/status` → preparing/ready | `restaurant_user` with `orders:update`                        |
+| `PATCH R/B/orders/{id}/status` → cancelled  | `restaurant_user` with `orders:cancel`                             |
+
+`R/B` abbreviates `/restaurants/{restaurantId}/branches/{branchId}`.
 
 Permission seed (added to core's RBAC seed migration):
 

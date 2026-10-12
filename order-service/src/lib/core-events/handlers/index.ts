@@ -3,7 +3,7 @@ import {CoreEventType} from "../event-types";
 import {handleBranchInvalidated} from "./branch.handler";
 import {handleProductInvalidated} from "./product.handler";
 import {handleRestaurantInvalidated} from "./restaurant.handler";
-import {handleIgnoredEvent} from "./identity.handler";
+import {handleIgnoredEvent, handleUserInvalidated} from "./identity.handler";
 
 export {CoreEventType} from "../event-types";
 
@@ -26,5 +26,5 @@ export function registerCoreEventHandlers(options: {reset?: boolean} = {}): void
     registerHandler(CoreEventType.PRODUCT_INVALIDATED, handleProductInvalidated);
     registerHandler(CoreEventType.RESTAURANT_INVALIDATED, handleRestaurantInvalidated);
     registerHandler(CoreEventType.ADDRESS_INVALIDATED, handleIgnoredEvent);
-    registerHandler(CoreEventType.USER_INVALIDATED, handleIgnoredEvent);
+    registerHandler(CoreEventType.USER_INVALIDATED, handleUserInvalidated);
 }

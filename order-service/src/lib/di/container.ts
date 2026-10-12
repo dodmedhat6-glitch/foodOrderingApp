@@ -14,6 +14,15 @@ import {PaymentService} from "../../app/payment/service/payment.service";
 import {PaymentWebhookService} from "../../app/payment/service/payment-webhook.service";
 import {PaymentController} from "../../app/payment/controller/payment.controller";
 import {PaymentWebhookController} from "../../app/payment/controller/webhook.controller";
+import {RedisPresenceStore} from "../../pkg/presence/redis-presence.store";
+import {redisClient} from "../cache/init";
+import {PresenceService} from "../../app/agent/service/presence.service";
+import {AgentService} from "../../app/agent/service/agent.service";
+import {AgentController} from "../../app/agent/controller/agent.controller";
+import {AssignmentService} from "../../app/delivery/service/assignment.service";
+import {DeliveryService} from "../../app/delivery/service/delivery.service";
+import {DeliveryController} from "../../app/delivery/controller/delivery.controller";
+import {FinanceService} from "../../app/finance/service/finance.service";
 import {env} from "../config/env";
 
 // Infrastructure
@@ -64,5 +73,31 @@ container.registerSingleton<PaymentWebhookController>(
     TOKENS.PaymentWebhookController,
     PaymentWebhookController,
 );
+
+// Live agent location, behind its port. An instance rather than a singleton
+// class for the same reason as the acquirer above: the adapter takes its
+// configuration in the constructor and pkg/ stays env-free, so lib/ supplies
+// the Redis connection and the TTL here.
+//
+// That TTL is the five-minute freshness rule (docs/database-design.md s3.8).
+// It is not a cache expiry with a business meaning bolted on — it is the only
+// place the rule exists, which is why nothing downstream compares timestamps.
+container.registerInstance<RedisPresenceStore>(
+    TOKENS.PresenceStore,
+    new RedisPresenceStore(redisClient, env.presence.staleSec),
+);
+
+// Delivery + agents. One phase, two bounded contexts: `app/agent/` never
+// writes an order, `app/delivery/` never writes presence.
+container.registerSingleton<PresenceService>(TOKENS.PresenceService, PresenceService);
+container.registerSingleton<AgentService>(TOKENS.AgentService, AgentService);
+container.registerSingleton<AssignmentService>(TOKENS.AssignmentService, AssignmentService);
+container.registerSingleton<DeliveryService>(TOKENS.DeliveryService, DeliveryService);
+container.registerSingleton<AgentController>(TOKENS.AgentController, AgentController);
+container.registerSingleton<DeliveryController>(TOKENS.DeliveryController, DeliveryController);
+
+// The restaurant's running balance. Registered now because settlement credits
+// it; the read endpoints and payouts arrive in Phase 4.
+container.registerSingleton<FinanceService>(TOKENS.FinanceService, FinanceService);
 
 export {container};

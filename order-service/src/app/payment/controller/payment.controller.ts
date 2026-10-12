@@ -7,10 +7,12 @@ import {validateBody} from "../../../lib/validation/validate";
 import {NotAuthenticated} from "../../../lib/auth/errors";
 import {RegionNotResolvedError} from "../../../lib/sharding/errors";
 import {OrderRequester} from "../../order/service/order.service";
+import {OrderScope} from "../../order/types";
 import {InitPaymentRequestDTO, RefundRequestDTO} from "../dto/payment.request.dto";
 import {PaymentService} from "../service/payment.service";
 
 const InvalidPaymentId = new AppError("Invalid payment id", 400);
+const InvalidScope = new AppError("Invalid restaurantId or branchId", 400);
 
 /**
  * Validate -> call service -> DTO -> respond (CLAUDE.md s10). Arrow-function
@@ -34,12 +36,19 @@ export class PaymentController {
         }
     };
 
+    /**
+     * `GET /api/restaurants/:restaurantId/branches/:branchId/payments/:paymentId`
+     * for restaurant staff, and the unscoped `GET /api/payments/:paymentId`
+     * for a customer reading their own. The scope, when the path carries one,
+     * narrows the order lookup behind the tenancy check to that branch.
+     */
     getById = async (req: Request, res: Response, next: NextFunction) => {
         try {
             const payment = await this.paymentService.getById(
                 paymentIdParam(req),
                 requesterOf(req),
                 concreteRegion(req),
+                scopeParams(req),
             );
             sendSuccess(res, payment);
         } catch (err) {
@@ -90,6 +99,30 @@ function paymentIdParam(req: Request): number {
     const paymentId = Number(Array.isArray(raw) ? undefined : raw);
     if (!Number.isInteger(paymentId) || paymentId <= 0) throw InvalidPaymentId;
     return paymentId;
+}
+
+/**
+ * The restaurant/branch pair from the path, or `undefined` on the unscoped
+ * route. Malformed is kept distinct from absent for the same reason as in the
+ * order controller: collapsing them would quietly widen a scoped read.
+ */
+function scopeParams(req: Request): OrderScope | undefined {
+    if (req.params.restaurantId === undefined && req.params.branchId === undefined) {
+        return undefined;
+    }
+
+    const restaurantId = positiveIntParam(req.params.restaurantId);
+    const branchId = positiveIntParam(req.params.branchId);
+    if (restaurantId === undefined || branchId === undefined) throw InvalidScope;
+
+    return {restaurantId, branchId};
+}
+
+function positiveIntParam(raw: string | string[] | undefined): number | undefined {
+    if (typeof raw !== "string") return undefined;
+
+    const id = Number(raw);
+    return Number.isInteger(id) && id > 0 ? id : undefined;
 }
 
 function headerValue(req: Request, name: string): string | undefined {

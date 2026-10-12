@@ -18,7 +18,8 @@ References:
 | ----------------------------------------------- | ------------------------------------- |
 | `POST /payments/init`                           | customer (idempotent, strict)         |
 | `POST /payments/webhook/{provider}`             | none (HMAC verified)                  |
-| `GET /payments/{paymentId}`                     | system_admin (or restaurant owner)    |
+| `GET /payments/{paymentId}`                     | system_admin                          |
+| `GET /restaurants/{rid}/branches/{bid}/payments/{paymentId}` | restaurant owner (`payments:read`) |
 | `POST /payments/{paymentId}/refund`             | system_admin                          |
 
 `{paymentId}` here is the `transactions.id` of a `charge` row (we call this a "payment" in the public API to avoid leaking ledger semantics).
@@ -163,6 +164,14 @@ exist.
 
 ## 4. GET /payments/{paymentId}
 
+Two paths, as for orders (docs/business-logic/orders.md §4). The flat one is
+admin-only — an admin has no restaurant or branch to name. Restaurant staff use
+`GET /restaurants/{restaurantId}/branches/{branchId}/payments/{paymentId}`,
+where `payments:read` is checked by `rbac()` after
+`requireRestaurantMember`/`requireBranchAccess`, and the branch is pushed into
+the lookup of the order behind the payment — so a payment id belonging to
+another branch's order is a 404, not a 403.
+
 - Authorization:
   - `system_admin`: always.
   - Restaurant owner: only if the transaction belongs to one of their orders.
@@ -222,7 +231,8 @@ order.
 | ----------------------------------- | ------------------------------------------------------- |
 | `POST /payments/init`               | `customer` (own order)                                  |
 | `POST /payments/webhook/{provider}` | none (signature required)                               |
-| `GET /payments/{id}`                | `system_admin`, `restaurant_user` (`payments:read`)     |
+| `GET /payments/{id}`                | `system_admin` only                                     |
+| `GET /restaurants/{rid}/branches/{bid}/payments/{id}` | `restaurant_user` (`payments:read`), member of both ids |
 | `POST /payments/{id}/refund`        | `system_admin` only (no `payments:refund` permission exists) |
 
 Seed permissions: `payments:read`, mapped only to `owner` (seeded by core's

@@ -119,12 +119,26 @@ export interface OrderHistoryEntryDTO {
 export class OrderDetailResponseDTO extends OrderResponseDTO {
     paymentSummary!: OrderPaymentSummaryDTO;
     history!: OrderHistoryEntryDTO[];
+    /**
+     * Absent until an agent is attached, rather than present and empty — the
+     * field appearing *is* the signal that somebody is bringing the order.
+     * Typed structurally rather than importing the delivery module's DTO
+     * class, so the wire shape stays declared where the response is declared.
+     */
+    delivery?: {
+        status: OrderStatus;
+        agent?: {id: number; name: string};
+        assignedAt?: string;
+        pickedAt?: string;
+        deliveredAt?: string;
+    };
 
     static fromDetail(
         order: OrderEntity,
         items: OrderItemEntity[],
         paymentSummary: OrderPaymentSummaryDTO,
         payment?: PaymentHandoffDTO,
+        delivery?: OrderDetailResponseDTO["delivery"],
     ): OrderDetailResponseDTO {
         const dto = Object.assign(
             new OrderDetailResponseDTO(),
@@ -132,6 +146,7 @@ export class OrderDetailResponseDTO extends OrderResponseDTO {
         );
         dto.paymentSummary = paymentSummary;
         dto.history = buildHistory(order);
+        if (delivery) dto.delivery = delivery;
         return dto;
     }
 }

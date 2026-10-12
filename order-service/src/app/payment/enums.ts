@@ -2,10 +2,13 @@
 // migrations/20260418000040_create_payment_sessions.ts and
 // migrations/20260418000050_create_transactions.ts.
 
-/** Row names in the replicated `payment_providers` lookup. */
+/**
+ * Row names in the replicated `payment_providers` lookup. External gateways
+ * only — cash on delivery has no gateway behind it, so it is a
+ * `TransactionMethod`, never a provider, and its rows carry `providerId: null`.
+ */
 export enum PaymentProviderName {
     KASHIER = "kashier",
-    COD = "cod",
 }
 
 /**

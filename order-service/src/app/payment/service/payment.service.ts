@@ -12,6 +12,7 @@ import {OrderEntity} from "../../order/entity/order.entity";
 import {OrderStatus, PaymentMethod} from "../../order/enums";
 import {OrderNotFoundError} from "../../order/errors";
 import {OrderRequester, OrderService} from "../../order/service/order.service";
+import {OrderScope} from "../../order/types";
 import {PaymentSessionEntity} from "../entity/payment-session.entity";
 import {TransactionEntity} from "../entity/transaction.entity";
 import {
@@ -47,6 +48,7 @@ import {
 } from "../repository/payment-session.repo";
 import {
     createTransaction,
+    createTransactionIfNew,
     findTransactionById,
     findTransactionsByOrderId,
     markChargeFullyRefunded,
@@ -187,12 +189,13 @@ export class PaymentService {
         paymentId: number,
         requester: OrderRequester,
         region: string,
+        scope?: OrderScope,
     ): Promise<PaymentResponseDTO> => {
         const conn = db(region);
         const transaction = await findTransactionById(paymentId, conn);
         if (!transaction) throw PaymentNotFoundError;
 
-        await this.assertCanReadTransaction(transaction, requester, conn);
+        await this.assertCanReadTransaction(transaction, requester, conn, scope);
 
         const names = await this.providerNames(region, conn);
         return PaymentResponseDTO.from(
@@ -306,6 +309,81 @@ export class PaymentService {
                 error: (err as Error).message,
             });
             throw fromProviderError(err);
+        }
+    };
+
+    /**
+     * The ledger half of delivery settlement, inside the caller's transaction.
+     *
+     * Two rows, both written through `createTransactionIfNew`:
+     *
+     *  1. **The COD collection**, for a cash order — the moment the agent takes
+     *     the money. It is created `succeeded` here rather than flipped from a
+     *     `pending` row written at placement, because until the handoff there
+     *     is no cash and therefore nothing to record. An order cancelled before
+     *     delivery leaves no collection row at all, which is the truth; a
+     *     pending row would have had to be cleaned up on every abandoned order.
+     *     (An online order needs nothing: its charge settled at capture.)
+     *  2. **The commission** — the platform's cut, `src = NULL` for the
+     *     platform, `dst` the restaurant's owner. `method = system`: no money
+     *     crossed a rail, it was netted off the balance.
+     *
+     * `ON CONFLICT DO NOTHING` on the unique `idempotency_key` is what makes a
+     * replayed settlement a no-op instead of a double entry — never a
+     * try/catch, which inside a transaction would abort every statement after
+     * it (CLAUDE.md s8). The keys are derived from the order's public id, so
+     * they are stable across retries without the caller having to carry one.
+     *
+     * Takes `conn` and never opens its own transaction: these rows have to
+     * commit with the status flip and the balance credit that justify them.
+     */
+    recordDeliverySettlement = async (
+        order: OrderEntity,
+        commissionMinor: number,
+        ownerUserId: number | null,
+        conn: Knex,
+    ): Promise<void> => {
+        if (order.paymentMethod === PaymentMethod.COD) {
+            await createTransactionIfNew(
+                {
+                    region: order.region,
+                    orderId: order.id,
+                    orderPublicId: order.publicId,
+                    type: TransactionType.COD_COLLECTION,
+                    method: TransactionMethod.COD,
+                    providerId: null,
+                    status: TransactionStatus.SUCCEEDED,
+                    amount: order.total,
+                    currency: order.currency,
+                    // Cash moved from the customer to the restaurant's owner,
+                    // by way of the agent. The agent is not an account here:
+                    // they are a courier for the money, not a party to it.
+                    srcAccId: order.customerId,
+                    dstAccId: ownerUserId,
+                    idempotencyKey: `cod:${order.publicId}`,
+                },
+                conn,
+            );
+        }
+
+        if (commissionMinor > 0) {
+            await createTransactionIfNew(
+                {
+                    region: order.region,
+                    orderId: order.id,
+                    orderPublicId: order.publicId,
+                    type: TransactionType.COMMISSION,
+                    method: TransactionMethod.SYSTEM,
+                    providerId: null,
+                    status: TransactionStatus.SUCCEEDED,
+                    amount: commissionMinor,
+                    currency: order.currency,
+                    srcAccId: ownerUserId,
+                    dstAccId: null, // NULL = the platform
+                    idempotencyKey: `commission:${order.publicId}`,
+                },
+                conn,
+            );
         }
     };
 
@@ -481,11 +559,21 @@ export class PaymentService {
         transaction: TransactionEntity,
         requester: OrderRequester,
         conn: Knex,
+        scope?: OrderScope,
     ): Promise<void> => {
         if (requester.role === SystemRole.SYSTEM_ADMIN) return;
         if (!transaction.orderPublicId) throw PaymentNotFoundError;
 
-        const order = await this.orderService.findByPublicId(transaction.orderPublicId, conn);
+        // `scope` is the branch from the request path. Passing it down means
+        // the order behind this payment has to *be* in that branch for the
+        // lookup to return anything — a payment id guessed from another branch
+        // of the same restaurant fails here rather than relying on the
+        // assertion below, which only knows about the restaurant.
+        const order = await this.orderService.findByPublicId(
+            transaction.orderPublicId,
+            conn,
+            scope,
+        );
         // Reuse the order module's own rule rather than restating it here:
         // two copies of a tenancy check are two chances to disagree. It
         // throws OrderNotFound, which we re-label — the caller asked about a
