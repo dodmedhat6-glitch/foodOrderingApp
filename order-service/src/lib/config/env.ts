@@ -119,6 +119,21 @@ const baseSchema = z.object({
     // the agent for the distance.
     AGENT_EARNING_BASE_MINOR: z.string().default("1500"),
     AGENT_EARNING_PER_KM_MINOR: z.string().default("300"),
+
+    // ---- archival (docs/implementation-plan.md Phase 5) ----
+    // How often the worker wakes to check whether it is inside the nightly
+    // window. Outside the window a tick returns without touching a shard.
+    ARCHIVAL_INTERVAL_SEC: z.string().default("3600"),
+    // The nightly window, local hours [start, end). Archival moves rows across
+    // clusters and holds row locks while it does; it runs when traffic is low.
+    ARCHIVAL_WINDOW_START_HOUR: z.string().default("2"),
+    ARCHIVAL_WINDOW_END_HOUR: z.string().default("5"),
+    // Orders (with their items, sessions, ledger and earnings) per batch.
+    ARCHIVAL_BATCH_SIZE: z.string().default("1000"),
+    // Hard stop per region per night; the next night resumes where it ended.
+    ARCHIVAL_MAX_RUNTIME_MIN: z.string().default("60"),
+    // How often lapsed rows are purged from idempotency_keys.
+    IDEMPOTENCY_PURGE_INTERVAL_SEC: z.string().default("3600"),
 });
 
 const parsed = baseSchema.parse(process.env);
@@ -249,6 +264,15 @@ export const env = {
     earnings: {
         baseMinor: Number(parsed.AGENT_EARNING_BASE_MINOR),
         perKmMinor: Number(parsed.AGENT_EARNING_PER_KM_MINOR),
+    },
+
+    archival: {
+        intervalSec: Number(parsed.ARCHIVAL_INTERVAL_SEC),
+        windowStartHour: Number(parsed.ARCHIVAL_WINDOW_START_HOUR),
+        windowEndHour: Number(parsed.ARCHIVAL_WINDOW_END_HOUR),
+        batchSize: Number(parsed.ARCHIVAL_BATCH_SIZE),
+        maxRuntimeMin: Number(parsed.ARCHIVAL_MAX_RUNTIME_MIN),
+        idempotencyPurgeIntervalSec: Number(parsed.IDEMPOTENCY_PURGE_INTERVAL_SEC),
     },
 
     payments: {

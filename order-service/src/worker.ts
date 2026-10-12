@@ -10,6 +10,7 @@ import {registerOrderJobs} from "./app/order/jobs";
 import {registerPaymentJobs} from "./app/payment/jobs";
 import {registerDeliveryJobs} from "./app/delivery/jobs";
 import {registerAgentJobs} from "./app/agent/jobs";
+import {registerArchivalJobs} from "./app/archival/jobs";
 
 /**
  * Background worker process. Boots the shared infra and hands control to the
@@ -33,6 +34,7 @@ registerOrderJobs();
 registerPaymentJobs();
 registerDeliveryJobs();
 registerAgentJobs();
+registerArchivalJobs();
 
 async function main() {
     noopServer.listen(0);

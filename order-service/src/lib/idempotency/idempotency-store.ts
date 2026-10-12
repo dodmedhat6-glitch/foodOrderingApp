@@ -86,9 +86,27 @@ export async function store(data: StoreIdempotencyInput, conn: Knex): Promise<vo
         .ignore();
 }
 
-/** Cleanup sweep for lapsed keys; returns the number of rows removed. */
-export async function deleteExpired(conn: Knex): Promise<number> {
-    return conn("idempotency_keys").where("expires_at", "<=", new Date()).del();
+/**
+ * Cleanup sweep for lapsed keys; returns the number of rows removed.
+ *
+ * Deletes in batches of `batchSize` rather than in one statement, so a backlog
+ * (the first run after this was scheduled, or after the worker was down) never
+ * becomes one long DELETE competing with the hot write path. Each batch is
+ * picked through idx_idempotency_keys_expires_at.
+ */
+export async function deleteExpired(conn: Knex, batchSize = 5000): Promise<number> {
+    const now = new Date();
+    let total = 0;
+    for (;;) {
+        const deleted = await conn("idempotency_keys")
+            .whereIn(
+                "key_hash",
+                conn("idempotency_keys").select("key_hash").where("expires_at", "<=", now).limit(batchSize),
+            )
+            .del();
+        total += deleted;
+        if (deleted < batchSize) return total;
+    }
 }
 
 function canonicalize(value: unknown): string {

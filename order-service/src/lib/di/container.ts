@@ -28,6 +28,7 @@ import {DeliveryController} from "../../app/delivery/controller/delivery.control
 import {LedgerService} from "../../app/payment/service/ledger.service";
 import {FinanceService} from "../../app/finance/service/finance.service";
 import {FinanceController} from "../../app/finance/controller/finance.controller";
+import {ArchivalService} from "../../app/archival/service/archival.service";
 import {env} from "../config/env";
 
 // Infrastructure
@@ -109,5 +110,9 @@ container.registerSingleton<DeliveryController>(TOKENS.DeliveryController, Deliv
 // that debit it, and the ledger summary behind both.
 container.registerSingleton<FinanceService>(TOKENS.FinanceService, FinanceService);
 container.registerSingleton<FinanceController>(TOKENS.FinanceController, FinanceController);
+
+// Archival: moves prior-year rows to the archive cluster. Runs in the worker
+// process only (app/archival/jobs.ts); the API never calls it.
+container.registerSingleton<ArchivalService>(TOKENS.ArchivalService, ArchivalService);
 
 export {container};

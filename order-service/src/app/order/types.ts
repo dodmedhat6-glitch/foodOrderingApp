@@ -1,4 +1,5 @@
 import {OrderStatus, PaymentMethod} from "./enums";
+import type {OrderEntity} from "./entity/order.entity";
 import {CoreCallContext} from "../../lib/core-client/types";
 
 /**
@@ -107,4 +108,14 @@ export interface OrderRequester {
 
 export interface PlaceOrderContext extends CoreCallContext {
     region: string;
+}
+
+/**
+ * A page of orders read across the hot shard and the archive, with the ids
+ * that came from the archive — their items live there too, so per-order
+ * follow-up reads must go to the same cluster.
+ */
+export interface SourcedOrders {
+    orders: OrderEntity[];
+    archivedIds: ReadonlySet<number>;
 }

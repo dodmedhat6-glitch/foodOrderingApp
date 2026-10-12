@@ -38,4 +38,7 @@ export const TOKENS = {
     // restaurant finance: balance, payouts, ledger summary
     FinanceService: Symbol.for("FinanceService"),
     FinanceController: Symbol.for("FinanceController"),
+
+    // archival: prior-year rows, hot shard -> archive cluster
+    ArchivalService: Symbol.for("ArchivalService"),
 };

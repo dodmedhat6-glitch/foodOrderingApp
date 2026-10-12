@@ -33,6 +33,15 @@ export async function up(knex: Knex): Promise<void> {
          WHERE t.order_id = o.id
            AND t.restaurant_id IS NULL;
 
+        -- Payouts have no order, but their ledger key is payout:<restaurantId>:<key>
+        -- (LedgerService.payoutKey), so a down/up of this migration does not
+        -- orphan them.
+        UPDATE transactions
+           SET restaurant_id = split_part(idempotency_key, ':', 2)::bigint
+         WHERE transaction_type = 'payout'
+           AND restaurant_id IS NULL
+           AND idempotency_key ~ '^payout:[0-9]+:';
+
         DROP INDEX IF EXISTS idx_transactions_dst_acc_type_created_at;
 
         -- supports GET /restaurants/:restaurantId/finance/payouts (type = 'payout')

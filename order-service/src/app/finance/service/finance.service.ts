@@ -1,7 +1,8 @@
 import {inject, injectable} from "tsyringe";
 import {Knex} from "knex";
 import {TOKENS} from "../../../lib/di/tokens";
-import {db} from "../../../lib/knex/knex";
+import {db, dbArchive} from "../../../lib/knex/knex";
+import {archiveBoundary} from "../../../lib/knex/archive-boundary";
 import {logger} from "../../../lib/logger/logger";
 import {wsChannels, wsPublish} from "../../../lib/websocket/publisher";
 import {
@@ -11,6 +12,7 @@ import {
 } from "../../../lib/http/pagination/cursor-pagination";
 import {LedgerService} from "../../payment/service/ledger.service";
 import {TransactionEntity} from "../../payment/entity/transaction.entity";
+import {RestaurantLedgerTotals} from "../../payment/types";
 import {RestaurantBalanceEntity} from "../entity/restaurant-balance.entity";
 import {CreatePayoutRequestDTO} from "../dto/finance.request.dto";
 import {
@@ -90,31 +92,62 @@ export class FinanceService {
     ): Promise<RestaurantBalanceResponseDTO> =>
         RestaurantBalanceResponseDTO.from(restaurantId, await this.getBalances(restaurantId, region));
 
-    /** `GET /restaurants/{restaurantId}/finance/payouts?from=&to=`. */
+    /**
+     * `GET /restaurants/{restaurantId}/finance/payouts?from=&to=`.
+     *
+     * A range reaching below the archive boundary reads both clusters and
+     * merges them, de-duplicated by id, for the same reasons as the order
+     * lists (OrderService.readAcross): until archival catches up after New
+     * Year, last year's payouts are still hot, and a crash mid-move leaves a
+     * row in both.
+     */
     listPayouts = async (
         restaurantId: number,
         range: FinanceRange,
         params: PaginationParams,
         region: string,
     ): Promise<{data: PayoutResponseDTO[]; meta: PaginationMeta}> => {
-        const rows = await this.ledger.listPayouts(restaurantId, range, params, db(region));
+        let rows = await this.ledger.listPayouts(restaurantId, range, params, db(region));
+        if (range.from < archiveBoundary()) {
+            const hotIds = new Set(rows.map((row) => row.id));
+            const archived = (
+                await this.ledger.listPayouts(restaurantId, range, params, dbArchive(region))
+            ).filter((row) => !hotIds.has(row.id));
+            const direction = params.sortOrder === "asc" ? 1 : -1;
+            rows = [...rows, ...archived]
+                .sort(
+                    (a, b) =>
+                        direction * (a.createdAt.getTime() - b.createdAt.getTime()) || direction * (a.id - b.id),
+                )
+                .slice(0, params.limit + 1);
+        }
         const page = buildPaginationResultBy(rows, params.limit, (row) =>
             String(row.createdAt.getTime()),
         );
         return {data: page.data.map(PayoutResponseDTO.from), meta: page.meta};
     };
 
-    /** `GET /restaurants/{restaurantId}/finance/summary?from=&to=`. */
+    /**
+     * `GET /restaurants/{restaurantId}/finance/summary?from=&to=`.
+     *
+     * Below the archive boundary the two clusters' sums are added per
+     * currency. Sums cannot be de-duplicated by id, so a row caught in both
+     * clusters by a crash mid-move is counted twice until the next archival
+     * run deletes the hot copy — a window of one night at most, on a path
+     * that only ever existed because of a crash.
+     */
     getSummary = async (
         restaurantId: number,
         range: FinanceRange,
         region: string,
-    ): Promise<FinanceSummaryResponseDTO> =>
-        FinanceSummaryResponseDTO.from(
-            restaurantId,
-            range,
-            await this.ledger.summarizeRestaurant(restaurantId, range, db(region)),
-        );
+    ): Promise<FinanceSummaryResponseDTO> => {
+        let totals = await this.ledger.summarizeRestaurant(restaurantId, range, db(region));
+        if (range.from < archiveBoundary()) {
+            const archived = await this.ledger.summarizeRestaurant(restaurantId, range, dbArchive(region));
+            totals = addTotals(totals, archived);
+        }
+        return FinanceSummaryResponseDTO.from(restaurantId, range, totals);
+    };
 
     /**
      * `POST /restaurants/{restaurantId}/finance/payouts` — records a bank
@@ -206,6 +239,27 @@ export class FinanceService {
 
         return PayoutResponseDTO.from(payout);
     };
+}
+
+/** Per-currency sum of two clusters' ledger totals, sorted by currency. */
+function addTotals(a: RestaurantLedgerTotals[], b: RestaurantLedgerTotals[]): RestaurantLedgerTotals[] {
+    const byCurrency = new Map<string, RestaurantLedgerTotals>();
+    for (const t of [...a, ...b]) {
+        const acc = byCurrency.get(t.currency);
+        byCurrency.set(
+            t.currency,
+            acc
+                ? {
+                      currency: t.currency,
+                      grossSales: acc.grossSales + t.grossSales,
+                      commission: acc.commission + t.commission,
+                      refunds: acc.refunds + t.refunds,
+                      payouts: acc.payouts + t.payouts,
+                  }
+                : {...t},
+        );
+    }
+    return [...byCurrency.values()].sort((x, y) => x.currency.localeCompare(y.currency));
 }
 
 /** Whether a recorded payout is the one this request describes. */
