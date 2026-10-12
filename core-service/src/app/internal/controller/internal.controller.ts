@@ -69,8 +69,27 @@ export class InternalController {
                 throw new AppError("branchId path param must be a positive integer", 400);
             }
 
-            const lines = parseReserveStockLines(req.body?.items);
+            const lines = parseStockLines(req.body?.items);
             const result = await this.internalService.reserveStock(branchId, lines);
+            sendSuccess(res, result);
+        } catch (err) {
+            next(err);
+        }
+    }
+
+    /**
+     * POST /api/internal/branches/:branchId/release-stock - the compensation
+     * for `reserveStock`, same body shape.
+     */
+    releaseStock = async (req: Request, res: Response, next: NextFunction) => {
+        try {
+            const branchId = Number(req.params.branchId);
+            if (!Number.isFinite(branchId) || branchId <= 0) {
+                throw new AppError("branchId path param must be a positive integer", 400);
+            }
+
+            const lines = parseStockLines(req.body?.items);
+            const result = await this.internalService.releaseStock(branchId, lines);
             sendSuccess(res, result);
         } catch (err) {
             next(err);
@@ -78,7 +97,7 @@ export class InternalController {
     }
 }
 
-function parseReserveStockLines(raw: unknown): ReserveStockLine[] {
+function parseStockLines(raw: unknown): ReserveStockLine[] {
     if (!Array.isArray(raw) || raw.length === 0) {
         throw new AppError("items must be a non-empty array", 400);
     }

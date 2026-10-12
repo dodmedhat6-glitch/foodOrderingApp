@@ -111,3 +111,68 @@ export async function reserveBranchStock(
 
     return { reserved, unavailable };
 }
+
+export interface MissingLine {
+    productId: number;
+    quantity: number;
+}
+
+/**
+ * Gives back units a `reserveBranchStock` held - the compensation
+ * order-service runs when an order that already reserved is never written,
+ * or is rejected/cancelled before delivery.
+ *
+ * Same lock discipline as the reserve (FOR UPDATE, ascending product_id), so a
+ * release and a reserve that overlap on two products can't deadlock each
+ * other.
+ *
+ * Never fails on a vanished row: the caller is already compensating something
+ * and has nothing useful to do with a second error. A product whose branch row
+ * is gone is reported in `missing` instead - the units had nowhere to return
+ * to, which is worth logging but not worth failing over. `is_available` is
+ * deliberately not checked: a product switched off since the reserve still
+ * owns the stock it was holding.
+ */
+export async function releaseBranchStock(
+    branchId: number,
+    lines: ReserveStockLine[],
+    conn: Knex
+): Promise<{ released: ReservedLine[]; missing: MissingLine[] }> {
+    if (lines.length === 0) {
+        return { released: [], missing: [] };
+    }
+
+    const quantityByProduct = new Map<number, number>();
+    for (const line of lines) {
+        quantityByProduct.set(line.productId, (quantityByProduct.get(line.productId) ?? 0) + line.quantity);
+    }
+    const productIds = [...quantityByProduct.keys()].sort((a, b) => a - b);
+
+    const rows = await conn("product_branch_details")
+        .select("product_id")
+        .where("branch_id", branchId)
+        .whereIn("product_id", productIds)
+        .orderBy("product_id", "asc")
+        .forUpdate();
+    const present = new Set<number>(rows.map((row: any) => Number(row.product_id)));
+
+    const released: ReservedLine[] = [];
+    const missing: MissingLine[] = [];
+    for (const productId of productIds) {
+        const quantity = quantityByProduct.get(productId)!;
+        if (!present.has(productId)) {
+            missing.push({ productId, quantity });
+            continue;
+        }
+
+        const [row] = await conn("product_branch_details")
+            .where("branch_id", branchId)
+            .where("product_id", productId)
+            .increment("stock", quantity)
+            .returning(PBD_COLUMNS);
+
+        released.push({ productId, quantity, remainingStock: row.stock });
+    }
+
+    return { released, missing };
+}
