@@ -100,3 +100,28 @@ export async function findBalancesByRestaurant(
 
     return rows.map(toEntity);
 }
+
+/**
+ * Locks an existing balance row without creating one — the payout path.
+ *
+ * Unlike `lockBalanceForUpdate`, a missing row stays missing: a restaurant
+ * that has never had a delivery settled in this currency has nothing to pay
+ * out, and inventing a zero row for it would only leave litter behind a
+ * refused request. Same lock, same ordering rule: taken before the balance is
+ * read for the sufficiency check, so two concurrent payouts cannot both pass
+ * it against the same funds.
+ */
+export async function findBalanceForUpdate(
+    restaurantId: number,
+    currency: string,
+    conn: Knex,
+): Promise<RestaurantBalanceEntity | undefined> {
+    const row = await conn("restaurant_balances")
+        .select(RESTAURANT_BALANCE_COLUMNS)
+        .where("restaurant_id", restaurantId)
+        .where("currency", currency)
+        .forUpdate()
+        .first();
+
+    return row ? toEntity(row) : undefined;
+}

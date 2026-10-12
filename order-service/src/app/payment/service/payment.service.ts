@@ -456,6 +456,7 @@ export class PaymentService {
                     // they are a courier for the money, not a party to it.
                     srcAccId: order.customerId,
                     dstAccId: ownerUserId,
+                    restaurantId: order.restaurantId,
                     idempotencyKey: `cod:${order.publicId}`,
                 },
                 conn,
@@ -476,6 +477,7 @@ export class PaymentService {
                     currency: order.currency,
                     srcAccId: ownerUserId,
                     dstAccId: null, // NULL = the platform
+                    restaurantId: order.restaurantId,
                     idempotencyKey: `commission:${order.publicId}`,
                 },
                 conn,
@@ -604,6 +606,7 @@ export class PaymentService {
                 // Platform -> customer: the mirror of the charge's direction.
                 srcAccId: null,
                 dstAccId: charge.srcAccId,
+                restaurantId: charge.restaurantId,
                 refundedPaymentId: charge.id,
                 // Scoped to the charge so the same admin key can't refund two
                 // different payments, and so a retried request collides on the

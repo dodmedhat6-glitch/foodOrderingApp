@@ -1,7 +1,8 @@
 import {Knex} from "knex";
 import {TransactionEntity} from "../entity/transaction.entity";
 import {TransactionMethod, TransactionStatus, TransactionType} from "../enums";
-import {CreateTransactionInput} from "../types";
+import {PaginationParams} from "../../../lib/http/pagination/cursor-pagination";
+import {CreateTransactionInput, LedgerRange, RestaurantLedgerTotals} from "../types";
 
 const TRANSACTION_COLUMNS = [
     "id",
@@ -17,6 +18,7 @@ const TRANSACTION_COLUMNS = [
     "currency",
     "src_acc_id",
     "dst_acc_id",
+    "restaurant_id",
     "is_refunded",
     "refunded_payment_id",
     "idempotency_key",
@@ -39,6 +41,7 @@ function toEntity(row: any): TransactionEntity {
         currency: row.currency,
         srcAccId: row.src_acc_id === null ? null : Number(row.src_acc_id),
         dstAccId: row.dst_acc_id === null ? null : Number(row.dst_acc_id),
+        restaurantId: row.restaurant_id === null ? null : Number(row.restaurant_id),
         isRefunded: row.is_refunded,
         refundedPaymentId: row.refunded_payment_id === null ? null : Number(row.refunded_payment_id),
         idempotencyKey: row.idempotency_key,
@@ -66,6 +69,7 @@ export async function createTransaction(
             currency: data.currency,
             src_acc_id: data.srcAccId,
             dst_acc_id: data.dstAccId,
+            restaurant_id: data.restaurantId,
             refunded_payment_id: data.refundedPaymentId ?? null,
             idempotency_key: data.idempotencyKey ?? null,
             created_at: now,
@@ -106,6 +110,7 @@ export async function createTransactionIfNew(
             currency: data.currency,
             src_acc_id: data.srcAccId,
             dst_acc_id: data.dstAccId,
+            restaurant_id: data.restaurantId,
             refunded_payment_id: data.refundedPaymentId ?? null,
             idempotency_key: data.idempotencyKey ?? null,
             created_at: now,
@@ -275,4 +280,84 @@ export async function markChargeFullyRefunded(chargeId: number, conn: Knex): Pro
     await conn("transactions")
         .where("id", chargeId)
         .update({is_refunded: true, updated_at: new Date()});
+}
+
+/**
+ * One page of a restaurant's payouts — backed by
+ * idx_transactions_restaurant_type_created_at: `restaurant_id` and
+ * `transaction_type` are the equality columns, `created_at` the range.
+ *
+ * Returns limit + 1 rows so the caller can tell whether another page exists,
+ * matching `findEarningsByAgent`. The cursor is epoch millis, never a
+ * stringified Date (see `buildPaginationResultBy`).
+ */
+export async function findPayoutsByRestaurant(
+    restaurantId: number,
+    range: LedgerRange,
+    params: PaginationParams,
+    conn: Knex,
+): Promise<TransactionEntity[]> {
+    const query = conn("transactions")
+        .select(TRANSACTION_COLUMNS)
+        .where("restaurant_id", restaurantId)
+        .where("transaction_type", TransactionType.PAYOUT)
+        .where("created_at", ">=", range.from)
+        .where("created_at", "<", range.to);
+
+    if (params.cursor) {
+        const millis = Number(params.cursor);
+        if (Number.isFinite(millis)) {
+            query.where("created_at", params.sortOrder === "asc" ? ">" : "<", new Date(millis));
+        }
+    }
+
+    const rows = await query
+        .orderBy("created_at", params.sortOrder)
+        .orderBy("id", params.sortOrder)
+        .limit(params.limit + 1);
+    return rows.map(toEntity);
+}
+
+/**
+ * A restaurant's ledger summed by category over a range, one row per
+ * currency — the finance summary (docs/business-logic/restaurant-finance.md
+ * s8). One statement with a `FILTER` per category rather than a query per
+ * category: same index, one pass.
+ *
+ * Only `succeeded` rows count. A pending refund is not yet money that left,
+ * and a failed charge is an audit row, not a sale.
+ *
+ * `::bigint` because a year of sales overflows INT; node-postgres hands
+ * bigint back as a string, hence the `Number()` — safe well past any
+ * restaurant's turnover in minor units.
+ */
+export async function sumLedgerByRestaurant(
+    restaurantId: number,
+    range: LedgerRange,
+    conn: Knex,
+): Promise<RestaurantLedgerTotals[]> {
+    const sumOf = (filter: string) =>
+        `COALESCE(SUM(amount) FILTER (WHERE status = 'succeeded' AND ${filter}), 0)::bigint`;
+
+    const rows = await conn("transactions")
+        .where("restaurant_id", restaurantId)
+        .where("created_at", ">=", range.from)
+        .where("created_at", "<", range.to)
+        .groupBy("currency")
+        .orderBy("currency", "asc")
+        .select(
+            "currency",
+            conn.raw(`${sumOf("transaction_type IN ('charge','cod_collection')")} AS gross_sales`),
+            conn.raw(`${sumOf("transaction_type = 'commission'")} AS commission`),
+            conn.raw(`${sumOf("transaction_type = 'refund'")} AS refunds`),
+            conn.raw(`${sumOf("transaction_type = 'payout'")} AS payouts`),
+        );
+
+    return rows.map((row: any) => ({
+        currency: row.currency,
+        grossSales: Number(row.gross_sales),
+        commission: Number(row.commission),
+        refunds: Number(row.refunds),
+        payouts: Number(row.payouts),
+    }));
 }

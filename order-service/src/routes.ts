@@ -4,6 +4,7 @@ import {orderRouter} from "./app/order/routes";
 import {paymentRouter} from "./app/payment/routes";
 import {deliveryRouter} from "./app/delivery/routes";
 import {agentRouter} from "./app/agent/routes";
+import {financeRouter} from "./app/finance/routes";
 
 export const routes = Router();
 
@@ -32,3 +33,7 @@ routes.use("/", deliveryRouter);
 
 // The agent's own surface: /agents/presence/*, /agents/tasks, /agents/earnings.
 routes.use("/", agentRouter);
+
+// Restaurant finance under /restaurants/:restaurantId/finance/* (balance,
+// payouts, summary). Restaurant-level, so no branch in the path.
+routes.use("/", financeRouter);

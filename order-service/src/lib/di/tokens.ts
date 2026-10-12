@@ -24,6 +24,8 @@ export const TOKENS = {
     PaymentWebhookService: Symbol.for("PaymentWebhookService"),
     PaymentController: Symbol.for("PaymentController"),
     PaymentWebhookController: Symbol.for("PaymentWebhookController"),
+    // The ledger as other modules see it: payouts and per-restaurant sums.
+    LedgerService: Symbol.for("LedgerService"),
 
     // delivery + agents (one phase, two bounded contexts)
     PresenceService: Symbol.for("PresenceService"),
@@ -33,7 +35,7 @@ export const TOKENS = {
     DeliveryService: Symbol.for("DeliveryService"),
     DeliveryController: Symbol.for("DeliveryController"),
 
-    // restaurant finance — the balance half only in this phase; the read
-    // endpoints and payouts arrive in Phase 4.
+    // restaurant finance: balance, payouts, ledger summary
     FinanceService: Symbol.for("FinanceService"),
+    FinanceController: Symbol.for("FinanceController"),
 };

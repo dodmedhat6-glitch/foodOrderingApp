@@ -300,6 +300,7 @@ export class PaymentWebhookService {
                 // the platform's balance on delivery (Phase 3), not here.
                 srcAccId: order.customerId,
                 dstAccId: null,
+                restaurantId: order.restaurantId,
                 idempotencyKey: this.ledgerKey(event),
             },
             trx,
@@ -357,6 +358,8 @@ export class PaymentWebhookService {
             trx,
         );
 
+        const order = await this.orderService.findByPublicId(session.orderPublicId, trx);
+
         // Recorded as a ledger row even though no money moved: a declined
         // attempt is part of the audit trail for the order, and it is what a
         // support agent looks at when a customer says their card was charged.
@@ -374,6 +377,7 @@ export class PaymentWebhookService {
                 currency: session.currency,
                 srcAccId: null,
                 dstAccId: null,
+                restaurantId: order.restaurantId,
                 idempotencyKey: this.ledgerKey(event),
             },
             trx,
@@ -382,8 +386,7 @@ export class PaymentWebhookService {
         // The order stays `pending_payment` and the customer may try again
         // against a fresh session — the failure is theirs to retry, not ours
         // to cancel on their behalf.
-        const customerId = (await this.orderService.findByPublicId(session.orderPublicId, trx))
-            .customerId;
+        const customerId = order.customerId;
 
         afterCommit.push(() => {
             wsPublish([wsChannels.customer(customerId)], PaymentWsEvent.FAILED, {
