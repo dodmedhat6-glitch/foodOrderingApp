@@ -6,7 +6,7 @@ import {sendSuccess} from "../../../lib/http/response";
 import {validateBody} from "../../../lib/validation/validate";
 import {NotAuthenticated} from "../../../lib/auth/errors";
 import {RegionNotResolvedError} from "../../../lib/sharding/errors";
-import {OrderRequester} from "../../order/service/order.service";
+import {OrderRequester} from "../../order/types";
 import {OrderScope} from "../../order/types";
 import {InitPaymentRequestDTO, RefundRequestDTO} from "../dto/payment.request.dto";
 import {PaymentService} from "../service/payment.service";

@@ -9,6 +9,7 @@ import {IPaymentProvider, ProviderWebhookEvent} from "../../../pkg/payments/paym
 import {OrderEntity} from "../../order/entity/order.entity";
 import {OrderStatus} from "../../order/enums";
 import {OrderService} from "../../order/service/order.service";
+import {OrderNotifier} from "../../order/service/order-notifier.service";
 import {PaymentSessionEntity} from "../entity/payment-session.entity";
 import {TransactionEntity} from "../entity/transaction.entity";
 import {
@@ -72,6 +73,7 @@ export class PaymentWebhookService {
         @inject(TOKENS.PaymentProvider) private readonly provider: IPaymentProvider,
         @inject(TOKENS.PaymentService) private readonly paymentService: PaymentService,
         @inject(TOKENS.OrderService) private readonly orderService: OrderService,
+        @inject(TOKENS.OrderNotifier) private readonly orderNotifier: OrderNotifier,
     ) {}
 
     /**
@@ -337,7 +339,7 @@ export class PaymentWebhookService {
                 currency: charge.currency,
                 ts: new Date().toISOString(),
             });
-            void this.orderService.announcePlacement(placed);
+            void this.orderNotifier.announcePlacement(placed);
         });
 
         return undefined;

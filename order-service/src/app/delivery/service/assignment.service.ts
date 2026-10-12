@@ -11,7 +11,7 @@ import {BranchLookup} from "../../../lib/core-client/types";
 import {wsChannels, wsPublish} from "../../../lib/websocket/publisher";
 import {OrderEntity} from "../../order/entity/order.entity";
 import {OrderStatus} from "../../order/enums";
-import {OrderService} from "../../order/service/order.service";
+import {OrderDispatchService} from "../../order/service/order-dispatch.service";
 import {countItemsByOrderIds} from "../../order/repository/order-item.repo";
 import {PresenceService} from "../../agent/service/presence.service";
 import {DeliveryTaskResponseDTO, PickupDTO} from "../dto/delivery.response.dto";
@@ -48,7 +48,7 @@ import {OfferOutcome} from "../types";
 @injectable()
 export class AssignmentService {
     constructor(
-        @inject(TOKENS.OrderService) private readonly orders: OrderService,
+        @inject(TOKENS.OrderDispatchService) private readonly orders: OrderDispatchService,
         @inject(TOKENS.PresenceService) private readonly presence: PresenceService,
         @inject(TOKENS.CacheProvider) private readonly cache: ICacheProvider,
     ) {}

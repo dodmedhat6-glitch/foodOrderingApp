@@ -49,7 +49,8 @@ It does **not** own: users, restaurants, branches, products, RBAC permission cat
 ```
 src/
   app.ts                    # express app composition
-  server.ts                 # bootstrap + graceful shutdown
+  server.ts                 # API bootstrap + graceful shutdown (HTTP, WS, core-events consumer)
+  worker.ts                 # background process: runs every registered job (see lib/jobs/)
   routes.ts                 # mounts all module routers under /api
   app/                      # business modules (one folder per bounded context)
     <module>/
@@ -63,6 +64,7 @@ src/
       enums.ts
       errors.ts
       routes.ts
+      jobs.ts                     # optional: register({...}) this module's background jobs
   lib/                       # app-aware glue: depends on app/, env, di
     auth/             # guard.ts, rbac.ts, errors.ts, jwt utils
     cache/            # init.ts, withCache.ts
@@ -81,7 +83,7 @@ src/
     core-client/      # sync HTTP client to core-service — NEW vs core (scaffolded in Phase 0)
     core-events/      # inbound async consumer (RabbitMQ): cache invalidation handlers — NEW vs core
     messaging/        # AMQP connection, channel lifecycle, DI registration — NEW vs core
-    jobs/             # background workers (only the cold archival worker in this milestone)
+    jobs/             # job registry + scheduler only; the jobs themselves live in app/<module>/jobs.ts
   pkg/                      # reusable, app-agnostic, framework-free
     cache/       # cache.interface.ts, redis.ts
     messaging/   # IMessageBroker interface, amqplib-based RabbitMQ client (no app types)
@@ -256,7 +258,7 @@ Reasons:
 
 ### Partitioning
 
-`orders` is **RANGE-partitioned by `created_at`**, one partition per month, declaratively — not with `pg_partman` (no Postgres 18 Windows build, and a rolling month window is a dozen lines of SQL). `lib/jobs/partition-maintenance.ts` pre-creates the next three months at boot and daily after; a DEFAULT partition catches anything that slips through and is expected to stay empty.
+`orders` is **RANGE-partitioned by `created_at`**, one partition per month, declaratively — not with `pg_partman` (no Postgres 18 Windows build, and a rolling month window is a dozen lines of SQL). `app/order/jobs.ts` pre-creates the next three months at boot and daily after; a DEFAULT partition catches anything that slips through and is expected to stay empty.
 
 Four consequences that constrain every migration and query touching `orders`:
 
@@ -463,7 +465,7 @@ Rules for anything that touches money here:
 4. **Never hold a transaction across a provider call.** The refund row is
    written `pending` first, outside any transaction, and the webhook settles
    it. A timeout leaves it `pending`, which is the truth.
-5. **An online order holds reserved stock.** `lib/jobs/payment-expiry.ts` is
+5. **An online order holds reserved stock.** `app/payment/jobs.ts` is
    what gives it back when nobody pays; anything that leaves an order in
    `pending_payment` must be reachable by that sweep.
 

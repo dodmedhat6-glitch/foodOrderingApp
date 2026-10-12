@@ -244,7 +244,7 @@ was built differently. What actually shipped:
 **1. Partitioning is native, not `pg_partman`.** The extension has no build for
 Postgres 18 on Windows and no prebuilt binary. `orders` is RANGE-partitioned by
 month declaratively in `20260418000020_create_orders.ts`, with a DEFAULT
-partition as a safety net, and `lib/jobs/partition-maintenance.ts` pre-creates
+partition as a safety net, and `app/order/jobs.ts` pre-creates
 the next three months at boot and daily after. That is the only behaviour we
 wanted from partman. Swapping it in later means replacing that job with
 `create_parent()` + `run_maintenance_proc()`; nothing else changes.
@@ -464,7 +464,7 @@ it. `expires_at` is what `POST /payments/init` returns and what the sweep scans.
 necessary: one transaction legitimately reports `PENDING` and then `SUCCESS`,
 and those are two facts, not a duplicate.
 
-**7. A payment-expiry sweep was added** (`lib/jobs/payment-expiry.ts`,
+**7. A payment-expiry sweep was added** (`app/payment/jobs.ts`,
 `PAYMENT_SESSION_TIMEOUT_MIN` / `PAYMENT_EXPIRY_SWEEP_INTERVAL_SEC`). This plan
 scheduled no worker for Phase 2, but an online order reserves its stock in core
 *before* the order row exists, so an abandoned checkout holds units out of
@@ -647,7 +647,7 @@ talk through services, never repositories (CLAUDE.md §3).
    not from Redis — it releases work, so it reads the durable copy:
    `assigned` → unclaim and re-offer (§3.2); `picked` → 409 `AgentInActiveDelivery`
    (the food is in their bag; going offline is not a thing they get to do).
-5. `lib/jobs/presence-sweep.ts` (`PRESENCE_SWEEP_SEC`, default 60, Redis lock per
+5. `app/agent/jobs.ts` (`PRESENCE_SWEEP_SEC`, default 60, Redis lock per
    region) removes geo entries whose meta key has expired. Housekeeping, not
    correctness — a tombstone is already invisible to the candidate scan — so it
    only keeps the geo set from growing without bound.
@@ -696,7 +696,7 @@ and `accepted` into one state, and needs no durable per-attempt row. The cost is
 K−1 agents seeing an offer that evaporates, which is the normal experience on
 every dispatch platform.
 
-**The assignment sweep** (`lib/jobs/assignment-sweep.ts`, interval
+**The assignment sweep** (`app/delivery/jobs.ts`, interval
 `ASSIGNMENT_SWEEP_SEC`, default 15) is the entry point, not a post-commit hook in
 `order.service`. An in-process hook on the `ready` transition fires once and only
 when a human moves the order — if no agent is online in that instant, the order

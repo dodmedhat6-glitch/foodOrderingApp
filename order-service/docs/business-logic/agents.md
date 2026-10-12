@@ -42,7 +42,7 @@ conditional UPDATE on `orders`, the only check that survives a Redis flush.
 ping, at most 30 seconds away. What must survive a restart — who delivered what,
 and what they earned — is in `orders` and `agent_earnings`, both durable.
 
-`lib/jobs/presence-sweep.ts` (`PRESENCE_SWEEP_SEC`, default 60, Redis lock per
+`app/agent/jobs.ts` (`PRESENCE_SWEEP_SEC`, default 60, Redis lock per
 region) removes geo tombstones so the set does not grow without bound. It is
 housekeeping, not correctness: a tombstone is already invisible to dispatch.
 

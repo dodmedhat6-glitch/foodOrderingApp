@@ -172,7 +172,7 @@ export class RedisPresenceStore implements IPresenceStore {
 
         do {
             // ZSCAN returns a flat [member, score, member, score, ...] array.
-            const [next, flat] = await this.client.zscan(cursor, geoKey, "COUNT", REAP_BATCH);
+            const [next, flat] = await this.client.zscan(geoKey, cursor, "COUNT", REAP_BATCH);
             cursor = next;
 
             const members: string[] = [];
