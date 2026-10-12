@@ -863,6 +863,52 @@ No new migrations.
 - Admin can record a payout; balance decrements; same idempotency key returns the same payout.
 - Payout > balance → 409 `InsufficientBalance`.
 
+### Deviations as built
+
+**1. One migration after all: `transactions.restaurant_id`** (`20260418000140`).
+The plan keyed payouts on `dst_acc_id = ownerId`, but core exposes no
+restaurant → owner lookup, so settlement has always written its commission with
+`src_acc_id = NULL` and no ledger row named a restaurant. The column is set on
+every ledger write (charge, failed charge, refund, COD collection, commission,
+payout), backfilled from `orders` for order rows and from the ledger key for
+payouts, and indexed `(restaurant_id, transaction_type, created_at DESC)`.
+`idx_transactions_dst_acc_type_created_at` is dropped — no query read it.
+
+**2. Routes are nested under the restaurant** (CLAUDE.md §4):
+`/restaurants/{rid}/finance/{balance,payouts,summary}`, not `/restaurant/*`.
+The tenant comes from the path, so `requireRestaurantMember` guards it; there is
+no branch segment because a balance belongs to the restaurant.
+
+**3. The summary endpoint (restaurant-finance.md §8) was built** — it is one
+query on the new index.
+
+**4. `LedgerService`** in the payment module is how finance reaches
+`transactions`; nothing outside `app/payment/` imports its repository.
+
+**5. The ledger is the last line of payout idempotency.** The payout's ledger key
+is `payout:<restaurantId>:<Idempotency-Key>` and is looked up *before* the
+sufficiency check, inside the transaction that holds the balance lock. A replay
+after the HTTP idempotency record is gone still returns the original payout and
+never debits twice.
+
+**6. `finance.payout_recorded`** is broadcast on `restaurant:<id>`.
+
+### Verified by the Phase 4 pass
+
+`play/test-finance.ts` — 48 checks over HTTP: owner, manager, admin read;
+staff, another restaurant's owner, customer, anonymous refused; region and id
+validation; owner cannot record a payout; missing key 400; invalid body 400;
+payout recorded and balance debited; replay returns the same payout; same key
+with a different body 409; **replay after wiping both idempotency stores still
+returns the same payout with no second debit**; overdraw, unknown currency and
+a restaurant with no balance row refused (none created); two concurrent
+payouts against a balance that covers one → one 201, one 409; the socket event;
+payout pagination and range filters; summary totals (failed charges and pending
+refunds excluded, another restaurant's rows excluded). `play/explain-finance.ts`
+— both new queries reach `idx_transactions_restaurant_type_created_at`.
+`play/test-delivery-cycle.ts` still all-pass with settlement writing
+`restaurant_id`.
+
 ---
 
 ## Phase 5 — Cold archival worker (the only background worker)
@@ -907,7 +953,7 @@ Every night, move rows whose `created_at` is in a **prior year** from the hot cl
 
 - None.
 
-### Acceptance
+### Acceptance (Phase 5)
 
 - Seed 5,000 orders in the hot cluster, half of them dated prior year.
 - Run the archival worker once.
@@ -915,6 +961,63 @@ Every night, move rows whose `created_at` is in a **prior year** from the hot cl
 - `GET /customer/orders?year=<priorYear>` returns rows from the archive cluster; `EXPLAIN` shows it's hitting the archive.
 - Re-running the worker is a no-op (nothing left to move; logs say `moved=0`).
 - Killing the worker mid-batch and restarting it does not duplicate rows (archive inserts use `ON CONFLICT DO NOTHING`).
+
+### Deviations as built
+
+**1. The worker lives in `app/archival/`**, registered from `worker.ts` like
+every other job — not `lib/jobs/archival.worker.ts`. `lib/jobs/` holds only the
+registry and scheduler (CLAUDE.md §3).
+
+**2. Order-driven, not table-driven.** Each batch is a set of *finished*
+(`delivered` / `cancelled` / `rejected`) prior-year orders, and their
+`order_items`, `payment_sessions`, `transactions` and `agent_earnings` move with
+them regardless of the child row's own timestamp — a January refund of a
+December charge stays with its order. Orderless payouts and webhook audit rows
+move afterwards by their own timestamp. An order still in flight across New
+Year waits for the next night.
+
+**3. The hot delete proves itself.** Children are deleted by `order_id` with
+`RETURNING id`; if a row comes back that was not in the copy (written to the
+order mid-batch), the hot transaction rolls back and the batch is retried.
+
+**4. Reads merge, they don't switch.** Right after New Year prior-year rows are
+still hot, and a crash between the archive commit and the hot delete leaves a
+row in both. So every read whose range reaches below the boundary asks both
+clusters for the same page and merges, de-duplicated by id: `GET
+/customer/orders?year=`, the branch list with `from` before the boundary (the
+default live dashboard stays hot-only), finance payouts and summary.
+`GET /orders/{id}` tries hot first and the archive only for a miss whose UUIDv7
+predates the boundary, for any caller who may read the order — so tracking a
+current order never touches the archive. Other single-row reads
+(`GET /payments/{id}`, refunds) stay hot-only.
+
+**5. Scheduling.** The scheduler is interval-only, so the job wakes every
+`ARCHIVAL_INTERVAL_SEC` and works only inside `[ARCHIVAL_WINDOW_START_HOUR,
+ARCHIVAL_WINDOW_END_HOUR)` local time; `npm run archive:now` runs it
+immediately. Per-region Redis lock, `ARCHIVAL_MAX_RUNTIME_MIN` cap,
+`ARCHIVAL_BATCH_SIZE` orders per batch. Archive month partitions are created
+ahead of each batch.
+
+**6. The boundary is local midnight on 1 January** (`lib/knex/archive-boundary.ts`),
+matching how `created_at` is written and how `yearWindow` reads.
+
+**7. `idempotency_keys` purge.** `deleteExpired` existed but nothing scheduled
+it, so the table grew with every order. It now runs hourly in batches
+(`IDEMPOTENCY_PURGE_INTERVAL_SEC`).
+
+### Verified by the Phase 5 pass
+
+`play/test-archival.ts` — 32 checks: 5,000 orders seeded, half prior-year;
+one run moves exactly the 2,490 finished prior-year orders in three
+1,000-order batches with all 4,980 items, 830 sessions, the ledger (including 50
+current-year refunds of archived charges) and 1,992 earnings, leaving the 10
+unfinished prior-year orders and every current-year order hot; JSONB including a
+top-level array survives; payouts and webhook events split by year; archive rows
+land in month partitions; a re-run moves nothing; a held lock skips; a row
+planted in both clusters reads once and the next run heals it; archived order
+detail with items and payment summary; a New-Year-straddling branch list and
+two-year finance reads merge both clusters; the idempotency purge clears 12,000
+lapsed keys across batches and keeps live ones.
 
 ---
 

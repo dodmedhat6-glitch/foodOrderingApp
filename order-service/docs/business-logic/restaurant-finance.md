@@ -1,6 +1,6 @@
 # Business Logic — Restaurant Finance Module
 
-Owner module: `app/restaurant-finance/`
+Owner module: `app/finance/` (ledger access through `app/payment/service/ledger.service.ts`)
 
 Read views over a restaurant's running balance and payout history.
 
@@ -10,11 +10,15 @@ The **writes** that change the balance live in the Deliveries module (settlement
 
 ## 1. Endpoints
 
-| Endpoint                                              | Auth                                  |
-| ----------------------------------------------------- | ------------------------------------- |
-| `GET /restaurant/balance`                             | restaurant owner / manager (`finance:read`) |
-| `GET /restaurant/payouts?from=&to=`                   | restaurant owner / manager (`finance:read`) |
-| `POST /restaurant/payouts` *(admin-side write)*       | `system_admin`                        |
+| Endpoint                                                    | Auth                                  |
+| ----------------------------------------------------------- | ------------------------------------- |
+| `GET /restaurants/{rid}/finance/balance`                    | restaurant owner / manager (`finance:read`) |
+| `GET /restaurants/{rid}/finance/payouts?from=&to=`          | restaurant owner / manager (`finance:read`) |
+| `GET /restaurants/{rid}/finance/summary?from=&to=`          | restaurant owner / manager (`finance:read`) |
+| `POST /restaurants/{rid}/finance/payouts` *(admin write)*   | `system_admin`                        |
+
+As built, see docs/api-contracts.md §5 for the wire shapes. The restaurant is
+always the path segment, guarded by `requireRestaurantMember`.
 
 `POST /restaurant/payouts` is the admin endpoint that records an externally-completed bank transfer. It's the only write in this module; it lives here because the data primarily affects restaurant balance views.
 
@@ -38,10 +42,10 @@ The **writes** that change the balance live in the Deliveries module (settlement
 
 ## 3. GET /restaurant/payouts?from=&to=
 
-- Filters `transactions` where `transaction_type='payout'` and `dst_acc_id=ownerId`.
+- Filters `transactions` where `transaction_type='payout'` and `restaurant_id = :rid` (column added by migration `20260418000140` — core exposes no restaurant -> owner lookup, so `dst_acc_id` could never be filled).
 - Defaults: `from = 90 days ago`, `to = NOW()`.
 - Cursor pagination by `created_at DESC`.
-- Backed by `idx_transactions_dst_acc_type_created_at` (partial on `payout`).
+- Backed by `idx_transactions_restaurant_type_created_at`.
 - Response item: `PayoutResponseDTO { id, amount, currency, status, providerReferenceId, createdAt }`.
 
 ---
@@ -88,7 +92,7 @@ Out of scope. The platform records payouts that operations executes externally. 
 
 ## 6. Invariants
 
-1. `restaurant_balances.balance` never goes negative (enforced by the FOR UPDATE check + trx).
+1. A payout never takes the balance below zero (enforced by the FOR UPDATE check + trx). The balance itself *may* be negative — a refund after a payout — and then every payout is refused until deliveries earn it back.
 2. The sum of positive deltas (delivered settlements) minus payouts equals the current balance — auditable from `transactions` alone.
 3. A payout is recorded only after the bank transfer cleared (operator's responsibility); schema does not enforce this.
 
@@ -117,4 +121,4 @@ For owner dashboards (future, not in this milestone, but the API supports it):
   - Net deposits (gross - commission - refunds).
   - Payouts (sum of `payout`).
 
-This is a single SQL query with `SUM(...) FILTER (WHERE ...)` per category. Not implemented now; documented so the schema is shown to support it cheaply.
+Implemented as `GET /restaurants/{rid}/finance/summary` — one `SUM(...) FILTER (WHERE ...)` query per cluster, over `idx_transactions_restaurant_type_created_at`.

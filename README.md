@@ -10,13 +10,14 @@ The backend is written in Node.js and TypeScript on Express 5, with PostgreSQL
 repository is a monorepo: each service is meant to be a self-contained
 application with its own dependencies, migrations and configuration.
 
-**Current status:** `core-service` is the only service with code. It covers
-authentication, users, restaurants, branches, products, addresses and RBAC, and
-is still in progress: some modules are complete end to end, others have their
-service and data layers written but are not yet exposed over HTTP (see
-[What is implemented](#what-is-implemented)). `order-service`, `payment-service`
-and `analytics-service` are planned and do not exist in the repository yet. The
-project is being built incrementally toward a service-oriented architecture.
+**Current status:** two services are implemented. `core-service` covers
+authentication, users, restaurants, branches, products, addresses and RBAC.
+`order-service` (see [`order-service/`](order-service/) and its `docs/`) covers
+orders, Kashier payments and refunds, delivery dispatch and agent presence,
+restaurant finance (balance, payouts, ledger summary) and nightly archival of
+prior-year data to a cold cluster — every phase of its implementation plan is
+built. Payments live inside `order-service`; `analytics-service` is still
+planned.
 
 ## Engineering Highlights
 
@@ -51,21 +52,20 @@ project is being built incrementally toward a service-oriented architecture.
 
 | Area | Status | What is implemented |
 | --- | --- | --- |
-| Authentication | Implemented ⚠️ | Register (customer or restaurant owner), login, refresh, staff invite acceptance. bcrypt password hashing, JWT access and refresh tokens in `httpOnly` cookies. Blocked on a fresh database by a schema mismatch (see [Known Issues](#known-issues)). |
+| Authentication | Implemented | Register (customer or restaurant owner), login, refresh, staff invite acceptance. bcrypt password hashing, JWT access and refresh tokens in `httpOnly` cookies. |
 | Password reset | Implemented | 6-digit OTP generated with `crypto.randomInt`, stored as a SHA-256 hash with a 10-minute expiry, sent through Mailjet. The request endpoint requires an `Idempotency-Key` header and does not reveal whether an account exists. |
 | Users | Implemented | `GET /api/user/me`, `PATCH /api/user/update-user`. |
 | Restaurants | Implemented | Created as `pending` during owner sign-up. Public listing with cursor pagination and filters, owner updates, status changes by a system admin. |
 | Branches | Implemented | Create/update (owner), status and commission changes (system admin), list by restaurant, PostGIS nearby search cached in Redis. |
-| RBAC | Implemented ⚠️ | Roles, permissions, restaurant members, member-branch assignments. Member create/list/update/delete, branch reassignment, role-permission lookup. Invitation emails are not sent yet, and the system-admin bypass in `rbac()` has a bug. |
+| RBAC | Implemented ⚠️ | Roles, permissions (seeded by migration), restaurant members, member-branch assignments. Member create/list/update/delete, branch reassignment, role-permission lookup. Invitation emails are not sent yet. |
 | Permission cache | Implemented | In-process cache (`Map`, 1-hour TTL) of role → permissions, so the database is queried at most once an hour per role and process. |
 | Response cache / idempotency | Implemented | Redis-backed `withCache()` and `idempotency()` middleware. |
-| Products | Partial | Categories, products, per-branch details, the auto-populating trigger, service and repository layers. Routes are defined but **not mounted** in `src/routes.ts`. |
-| Addresses | Partial | Full CRUD service with single-default-address handling. Routes are defined but **not mounted**, and the insert does not match the table schema. |
+| Products | Implemented | Categories, products, per-branch price/stock/availability, the auto-populating trigger. Public catalogue reads; owner create/update; `PATCH /branches/:branchId/products/:id` for branch details. |
+| Addresses | Implemented | `GET/POST /api/addresses`, `PATCH/DELETE /api/addresses/:id`, single-default handling. |
 | Health checks | Implemented | `GET /api/health` runs a `select 1` against PostgreSQL. |
-| Event outbox / API keys | Schema only | `event_outbox` and `api_keys` tables exist as groundwork for service-to-service communication. No code uses them yet. |
+| Event outbox / API keys | Implemented | Transactional outbox drained to RabbitMQ by `core-service`'s worker; API-key auth for `order-service`'s calls to `/api/internal/*`. |
 | Automated tests | Not started | No test suite yet. |
-| `order-service` | Planned | Cart, checkout and order lifecycle. |
-| `payment-service` | Planned | Payment processing and refunds. |
+| `order-service` | Implemented | Orders, Kashier v3 payments and refunds, dispatch and presence, restaurant finance, cold archival. Region-sharded Postgres, Redis, RabbitMQ, socket.io. |
 | `analytics-service` | Planned | Reporting and business metrics. |
 
 ## Architecture
@@ -356,51 +356,20 @@ From the repository root:
 
 ## Known Issues
 
-These were found by running the service against a database built from the
-migrations. They are listed so the current state is clear.
-
-**Migration ordering on a fresh database.**
-`20260224200000_create_products_tables.ts` has a timestamp earlier than the
-migrations that create `restaurants` and `restaurant_branches`, which its
-foreign keys reference. Knex runs migrations in filename order, so
-`migrate:latest` on an empty database stops with
-`relation "restaurants" does not exist`. Until the file is renamed, apply the
-migrations up to the branches table first:
-
-```bash
-for m in 20260819090202_user_table.ts 20260819150824_password_reset_table.ts \
-         20260819151315_customer_adresses_table.ts 20260821190000_expand_password_reset_otp_code.ts \
-         20260827000435_restaurant_tabel.ts 20260831130551_create_restaurant_branches_tabel.ts \
-         20260224200000_create_products_tables.ts; do
-  npm run knex -- migrate:up "$m"
-done
-npm run knex -- migrate:latest
-```
-
-The long-term fix is to rename the migration so it sorts after its
-dependencies. Databases that already ran it need their `knex_migrations` row
-updated at the same time.
+**Existing databases after pulling the migration renames.** Two `core-service`
+migrations were renamed so a fresh database can be built from scratch. Run
+`npm --prefix core-service run migrate` (not the raw `knex migrate:latest`): it
+first rewrites the old names in `knex_migrations`, then migrates. Running knex
+directly on an old database fails with "migration directory is corrupt".
 
 **Other open items:**
 
-- **Schema drift:** the user repository reads and writes a `name` column, but
-  the `users` migration defines `username`. Registration therefore fails on a
-  freshly migrated database. The address insert also omits the `NOT NULL`
-  `text` column. A new migration needs to align the schema with the code.
-- **No seed data:** `roles`, `permissions` and `role_permissions` are empty
-  after migration. Restaurant sign-up needs an `owner` role, so those rows must
-  be inserted manually for now.
-- **Unmounted routers:** `productRouter` and `customerAddressRouter` exist but
-  are not registered in `src/routes.ts`. Also, `PATCH /products/:id` uses
-  `requireBranchAccess('branchId')` on a path that has no `branchId` parameter.
-- **System-admin bypass in `rbac()`:** the condition is inverted
-  (`!allowSystemAdmin && …`), so system admins get `403` on routes guarded by
-  `rbac()`.
 - **Staff invitations:** the invite OTP is logged to the console and not
   emailed. `createMember` returns errors from its transaction instead of
   throwing them.
-- **Error logs include the request body,** which can contain passwords. Sensitive
-  fields should be redacted.
+- Refresh tokens are not rotated or revocable; reset OTPs are not single-use.
+- No automated test suite; verification lives in `order-service/play/` scripts
+  (untracked) and manual passes recorded in `order-service/docs/implementation-plan.md`.
 
 ## Documentation
 
@@ -427,26 +396,23 @@ Completed:
 
 Remaining:
 
-- [ ] Fix migration ordering and the `users` / `customer_addresses` schema drift
-- [ ] Seed roles and permissions
-- [ ] Mount the product and address routes
-- [ ] Fix the system-admin bypass in `rbac()`
+- [x] Fix migration ordering and the `users` / `customer_addresses` schema drift
+- [x] Seed roles and permissions
+- [x] Mount the product and address routes
+- [x] Fix the system-admin bypass in `rbac()`
 - [ ] Send invitation emails. Make reset OTPs single-use by checking
       `consumed_at`.
 - [ ] Rotate refresh tokens and allow revoking them
-- [ ] Redact sensitive fields in logs. Use the incoming correlation ID when one
-      is provided.
+- [x] Redact sensitive fields in logs.
+- [ ] Use the incoming correlation ID when one is provided.
 - [ ] Automated test suite (unit + integration against PostgreSQL)
 - [ ] OpenAPI documentation
 - [ ] Dockerized local setup (PostgreSQL + PostGIS, Redis)
 
 ### Additional Services
 
-None of these exist yet.
-
-- [ ] `order-service`: cart, checkout and order lifecycle, reading branch
-      prices and availability from `core-service`
-- [ ] `payment-service`: payment processing and refunds
+- [x] `order-service`: orders, payments (Kashier v3) and refunds, delivery
+      dispatch, restaurant finance, cold archival — all phases built
 - [ ] `analytics-service`: reporting and business metrics, fed by events
       published from the `event_outbox` table
 
