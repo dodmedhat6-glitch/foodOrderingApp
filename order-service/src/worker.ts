@@ -11,6 +11,9 @@ import {registerPaymentJobs} from "./app/payment/jobs";
 import {registerDeliveryJobs} from "./app/delivery/jobs";
 import {registerAgentJobs} from "./app/agent/jobs";
 import {registerArchivalJobs} from "./app/archival/jobs";
+import {registerOutboxDrainJobs} from "./lib/events/jobs";
+import {messageBroker} from "./lib/messaging/init";
+import {env} from "./lib/config/env";
 
 /**
  * Background worker process. Boots the shared infra and hands control to the
@@ -35,9 +38,19 @@ registerPaymentJobs();
 registerDeliveryJobs();
 registerAgentJobs();
 registerArchivalJobs();
+registerOutboxDrainJobs();
 
 async function main() {
     noopServer.listen(0);
+
+    // Not awaited: `connect()` only resolves once the broker answers, and
+    // amqp-connection-manager retries forever, so awaiting it here would keep
+    // every other job from starting while RabbitMQ is down. The drain's
+    // publishes time out instead (publishTimeoutMs), leaving rows `pending`.
+    messageBroker
+        .declareExchange(env.outboundEvents.exchange)
+        .then(() => logger.info("order events exchange declared", {exchange: env.outboundEvents.exchange}))
+        .catch((err) => logger.warn("rabbitmq not reachable at boot — will retry", {error: (err as Error).message}));
 
     // Every job touches every shard, so check them before the first tick.
     const shards = await pingAll();
@@ -57,6 +70,12 @@ async function shutdown() {
     try {
         await io.close();
     } catch {}
+    // After stopAll: no drain tick is mid-publish once the jobs have settled.
+    try {
+        await messageBroker.close();
+    } catch (err) {
+        logger.warn("broker close error", {error: (err as Error).message});
+    }
     try {
         await destroyAll();
     } catch (err) {

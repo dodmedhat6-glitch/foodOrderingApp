@@ -43,6 +43,7 @@ import {releaseReservedStock} from "../stock";
 import {publicIdWindow, yearWindow} from "../windows";
 import {OrderStatusService} from "./order-status.service";
 import {OrderNotifier} from "./order-notifier.service";
+import {enqueueOrderPlaced} from "../events";
 // Type-only: the payment module imports this one, and a value import here
 // would close the cycle at require() time. The instance is resolved from the
 // container at call time instead (see `payments`).
@@ -513,6 +514,13 @@ export class OrderService {
         // the write. The caller's transaction must not commit on a stale
         // premise, so this is an error rather than a silent no-op.
         if (!updated) throw OrderNotFoundError;
+
+        // The only transition into `placed` is an online order's capture
+        // (COD orders are born `placed`), and `conn` is the webhook's trx —
+        // so the event commits with the payment or not at all.
+        if (target === OrderStatus.PLACED) {
+            await enqueueOrderPlaced(updated, await findItemsByOrderIds([updated.id], conn), conn);
+        }
 
         return updated;
     };

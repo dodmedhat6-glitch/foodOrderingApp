@@ -82,7 +82,15 @@ Each night, finished orders from previous years move to the archive shard,
 together with everything attached to them. Reads that ask for a previous year
 read both shards. See [business-logic/archival.md](business-logic/archival.md).
 
+## Outbound events
+
+When an order becomes `placed` (COD at placement, online at payment capture), the
+same transaction writes an `order.placed` row to the shard's `events_outbox`. The
+worker drains every shard's outbox onto the `order.events` exchange every 2 s
+(`FOR UPDATE SKIP LOCKED`, publisher confirms). analytics-service consumes it.
+Details: `lib/events/` and CLAUDE.md §8 "Outbound events".
+
 ## Out of scope
 
-Analytics, outbound events, read replicas, promo codes, and loyalty.
+The analytics service itself (`analytics-service/`), read replicas, promo codes, and loyalty.
 Deployment and load testing are a separate effort.

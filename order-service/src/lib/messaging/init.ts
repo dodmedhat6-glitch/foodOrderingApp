@@ -6,6 +6,7 @@ export const messageBroker = new RabbitMQClient({
     url: env.rabbit.url,
     reconnectInitialMs: 500,
     reconnectMaxMs: 15_000,
+    publishTimeoutMs: 5_000,
 
     // Connection state is the only way an operator can tell a healthy boot
     // from one where the broker was never reachable: `connect()` waits

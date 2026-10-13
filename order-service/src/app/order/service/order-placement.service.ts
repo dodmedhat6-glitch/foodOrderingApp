@@ -29,6 +29,7 @@ import {CreateOrderRequestDTO} from "../dto/order.request.dto";
 import {OrderResponseDTO, PaymentHandoffDTO} from "../dto/order.response.dto";
 import {releaseReservedStock, reserveStockOrFail} from "../stock";
 import {OrderNotifier} from "./order-notifier.service";
+import {enqueueOrderPlaced} from "../events";
 // Type-only: the payment module imports the order module, and a value import
 // here would close the cycle at require() time. The instance is resolved from
 // the container at call time instead (see `payments`).
@@ -155,6 +156,13 @@ export class OrderPlacementService {
                 );
 
                 items = await bulkInsertItems(order.id, lines.map(toItemInput(region)), trx);
+
+                // Same trx as the order: the event exists iff the order does.
+                // Online orders are `pending_payment` here and emit theirs
+                // when the capture moves them to `placed` (see ../events.ts).
+                if (order.status === OrderStatus.PLACED) {
+                    await enqueueOrderPlaced(order, items, trx);
+                }
 
                 await trx.commit();
             } catch (err) {

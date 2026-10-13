@@ -4,6 +4,15 @@ export interface RabbitMQConfig {
     reconnectMaxMs: number;
 
     /**
+     * How long `publish` waits for a broker confirm before rejecting.
+     * Unset = wait forever, which is what the request-path callers had. The
+     * outbox drain needs a bound: it publishes inside a transaction that
+     * holds row locks, and a publish that never settles would hold them for
+     * as long as the broker stays down.
+     */
+    publishTimeoutMs?: number;
+
+    /**
      * Called on every connect and every disconnect, including the failed
      * attempts while the broker is down.
      *

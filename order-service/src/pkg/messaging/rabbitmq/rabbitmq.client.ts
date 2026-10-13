@@ -88,6 +88,17 @@ export class RabbitMQClient implements IMessageBroker {
         await ch.close();
     }
 
+    // Assert an exchange on the long-lived publisher channel. `addSetup`
+    // (rather than a one-off assert) makes it part of that channel's setup,
+    // so a broker that restarts without the exchange gets it back before the
+    // next publish.
+    async declareExchange(exchange: string): Promise<void> {
+        await this.connect();
+        await this.publishChannel!.addSetup((ch: ConfirmChannel) =>
+            ch.assertExchange(exchange, "topic", {durable: true}),
+        );
+    }
+
     // Open a long-lived consumer channel.
     // Everything inside `setup` re-runs on every reconnect, so topology and
     // the consumer registration are restored automatically after broker restarts.
@@ -113,11 +124,15 @@ export class RabbitMQClient implements IMessageBroker {
 
     // Publish through the long-lived publisher channel.
     // persistent:true -> survives broker restart (when paired with a durable queue).
+    // Resolves on the broker's confirm. While disconnected the wrapper buffers
+    // the message, so without `timeout` a dead broker would leave this promise
+    // pending forever — see RabbitMQConfig.publishTimeoutMs.
     async publish(exchange: string, routingKey: string, body: Buffer): Promise<void> {
         await this.connect();
         await this.publishChannel!.publish(exchange, routingKey, body, {
             persistent: true,
             contentType: "application/json",
+            timeout: this.config.publishTimeoutMs,
         });
     }
 }
