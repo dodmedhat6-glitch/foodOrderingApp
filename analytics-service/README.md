@@ -53,7 +53,7 @@ python server.py
 ```bash
 python -m play.mock_core
 ```
-`owner` and `manager` get `analytics:read`; `cashier` doesn't. Each lookup is printed, so you can see the RBAC cache: one line per role per `RBAC_CACHE_TTL_SEC`.
+Mirrors core's grants: only `owner` has `analytics:read`; `branch_manager` and `staff` don't. Each lookup is printed, so you can see the RBAC cache: one line per role per `RBAC_CACHE_TTL_SEC`.
 
 **Terminal 3 — drive it**
 ```bash
@@ -89,7 +89,7 @@ More to try:
 
 | Command | Expect |
 | --- | --- |
-| `python -m play.mint_jwt --restaurant-role cashier` | 403 `PERMISSION_DENIED` |
+| `python -m play.mint_jwt --restaurant-role branch_manager` | 403 `PERMISSION_DENIED` |
 | `python -m play.mint_jwt --restaurant-id 7` | 403 (not a member of 42) |
 | `python -m play.mint_jwt --expires-in -60` | 401 |
 | `python -m play.mint_jwt --role system_admin` | 200 for any restaurant |

@@ -18,7 +18,7 @@ Conventions: money in **integer minor units** with `currency` (ISO 4217) beside 
 - **Token:** core's access token — cookie `access_token`, or `Authorization: Bearer <token>`. Cookie wins if both are present. HS256 with the platform's `ACCESS_SECRET`.
 - **Claims used:** `user_id`, `role`, `restaurantId`, `restaurantRole`.
 - **Authorization:** `system_admin` → everything. `restaurant_user` → only their own `restaurantId`, and only if core's permissions for their `restaurantRole` include the endpoint's permission. Any other role → 403.
-- **Permission:** `analytics:read`. It must be seeded in core's catalog (`permissions` resource `analytics`, action `read`) and granted to the restaurant roles that should see analytics — a core migration, like `20260927100300_seed_order_service_permissions.ts`.
+- **Permission:** `analytics:read`, seeded by core migration `20261014090000_seed_analytics_read_permission.ts` and granted to **`owner` only**: these endpoints are restaurant-wide (all branches summed), and `branch_manager`/`staff` are branch-scoped. A branch-level endpoint can be opened to them later with a role mapping.
 
 ---
 
