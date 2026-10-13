@@ -97,14 +97,14 @@ Note on ordering: authentication runs before parameter validation, so a request 
 
 | Code | Status | Defined in |
 | --- | --- | --- |
-| `VALIDATION_ERROR` | 400 | `lib/errors/errors.py` |
-| `NOT_FOUND` | 404 | `lib/errors/errors.py` |
-| `METHOD_NOT_ALLOWED` | 405 | `lib/errors/errors.py` |
-| `INTERNAL_ERROR` | 500 | `lib/errors/errors.py` |
-| `UNAUTHENTICATED` | 401 | `lib/auth/errors.py` |
-| `PERMISSION_DENIED` | 403 | `lib/auth/errors.py` |
-| `CORE_UNAVAILABLE` | 503 | `lib/coreclient/errors.py` |
-| `CORE_BAD_RESPONSE` | 502 | `lib/coreclient/errors.py` |
+| `VALIDATION_ERROR` | 400 | `lib/errors.py` |
+| `NOT_FOUND` | 404 | `lib/errors.py` |
+| `METHOD_NOT_ALLOWED` | 405 | `lib/errors.py` |
+| `INTERNAL_ERROR` | 500 | `lib/errors.py` |
+| `UNAUTHENTICATED` | 401 | `lib/auth.py` |
+| `PERMISSION_DENIED` | 403 | `lib/auth.py` |
+| `CORE_UNAVAILABLE` | 503 | `lib/core_client.py` |
+| `CORE_BAD_RESPONSE` | 502 | `lib/core_client.py` |
 | `ANALYTICS_INVALID_DATE_RANGE` | 400 | `app/analytics/errors.py` |
 | `ANALYTICS_DATE_RANGE_TOO_LARGE` | 400 | `app/analytics/errors.py` |
 | `ANALYTICS_INVALID_EVENT_PAYLOAD` | (422) | `app/analytics/errors.py` — never an HTTP response; logged when an event is dead-lettered |
@@ -152,7 +152,7 @@ Note on ordering: authentication runs before parameter validation, so a request 
 }
 ```
 
-Validated by `app/analytics/eventhandlers/payloads.py`: `restaurantId`, `branchId` > 0; money fields non-negative integers (`total` strict — `2500.0` is rejected); `currency` 3 letters; `placedAt` must carry a UTC offset. Unknown extra fields are ignored. Publisher: `order-service/src/app/order/events.ts`.
+Validated by `app/analytics/dto.py` (`OrderPlacedPayload`): `restaurantId`, `branchId` > 0; money fields non-negative integers (`total` strict — `2500.0` is rejected); `currency` 3 letters; `placedAt` must carry a UTC offset. Unknown extra fields are ignored. Publisher: `order-service/src/app/order/events.ts`.
 
 Effect: `agg_restaurant_day[(restaurantId, utc_date(placedAt))]` ← `orders_count += 1`, `revenue_sum += total`.
 

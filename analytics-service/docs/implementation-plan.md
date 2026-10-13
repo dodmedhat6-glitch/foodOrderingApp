@@ -27,15 +27,15 @@ Mirror core's outbox into `order-service`.
 
 ## Phase 2 — Skeleton: config, logging, boot
 
-`pyproject.toml`, `.env.example`, `lib/config/env.py`, `lib/logger/logger.py`, `lib/boot/{boot,server}.py`, `cmd/api/main.py`, `app/health`.
+`pyproject.toml`, `.env.example`, `lib/config.py`, `lib/logger.py`, `server.py` (wiring, `/health`).
 
 **Acceptance**
 - [x] Missing `ACCESS_SECRET` → one JSON line `invalid environment` naming it, exit 1.
-- [x] `python -m cmd.api.main` logs JSON lines; `GET /health` → `200 {"success":true,"data":{"status":"ok",...}}`.
+- [x] `python server.py` logs JSON lines; `GET /health` → `200 {"success":true,"data":{"status":"ok",...}}`.
 
 ## Phase 3 — Mongo: pkg client, entity, repo, indexes
 
-`pkg/mongo`, `app/analytics/entity/agg_restaurant_day.py`, `repository/{collections,indexes,agg_restaurant_day_repo,event_ids_repo}.py`.
+`app/analytics/types.py` (entity), `app/analytics/repository.py` (`ensure_indexes`, repos).
 
 **Acceptance**
 - [x] Boot logs `mongo connected` then `mongo indexes ensured`.
@@ -45,7 +45,7 @@ Mirror core's outbox into `order-service`.
 
 ## Phase 4 — Consumer: messaging, dedupe, handler, service write path
 
-`pkg/messaging`, `lib/coreevents`, `app/analytics/{enums,errors,types}.py`, `eventhandlers/`, `AnalyticsService.on_order_placed`.
+`pkg/messaging.py`, `lib/events.py`, `app/analytics/{errors,dto}.py`, `controller.py` `build_handlers`, `service.py` `on_order_placed`.
 
 **Acceptance**
 - [x] Boot logs `rabbit connected`, `event consumer started` with queue and bindings.
@@ -58,7 +58,7 @@ Mirror core's outbox into `order-service`.
 
 ## Phase 5 — Read path: auth, RBAC, DTOs, controller, routes
 
-`lib/auth`, `lib/rbac`, `lib/coreclient`, `pkg/httpclient`, `lib/errors`, `lib/http`, `lib/middleware`, `dto/`, `controller/`, `AnalyticsService.get_restaurant_days`.
+`lib/{auth,core_client,errors,http}.py`, `app/analytics/dto.py`, `controller.py` `build_router`, `service.py` `get_restaurant_days`.
 
 **Acceptance** (with `play.mock_core` running)
 - [x] No token → `401 UNAUTHENTICATED`; garbage cookie → 401; expired → 401.
@@ -71,7 +71,7 @@ Mirror core's outbox into `order-service`.
 
 ## Phase 6 — Shutdown, play/, docs
 
-`GracefulServer`, consumer `stop()` with in-flight drain, `play/{mock_core,mint_jwt,publish_test,check_mongo}.py`, all docs.
+`server.py` shutdown (`_Server`, consumer `stop()` with in-flight drain), `play/{mock_core,mint_jwt,publish_test,check_mongo}.py`, all docs.
 
 **Acceptance**
 - [x] Ctrl+C / CTRL_BREAK → `shutdown requested`, `event consumer stopped`, `shutdown complete`, exit code 0, no `rabbit disconnected` line.
@@ -88,7 +88,7 @@ Mirror core's outbox into `order-service`.
 
 **Acceptance**
 - [ ] Each event type enqueued in the transaction that performs its transition; `tsc` clean.
-- [ ] Each handler: payload model in `payloads.py`, input in `types.py`, one service method, `$inc`/`$setOnInsert` upsert.
+- [ ] Each handler: payload model in `dto.py`, one service method, `$inc`/`$setOnInsert` upsert.
 - [ ] `delivered` before `placed` produces the same final document as in order.
 - [ ] Replays deduped; invalid payloads to DLQ.
 
@@ -97,7 +97,7 @@ Mirror core's outbox into `order-service`.
 `agg_branch_day`, `agg_product_day` (`bulk_write`, `ordered=False`), `agg_platform_day` (keyed by currency).
 
 **Acceptance**
-- [ ] Each collection's indexes in `indexes.py`, each with the query it serves.
+- [ ] Each collection's indexes in `repository.py` `ensure_indexes`, each with the query it serves.
 - [ ] A 3-item order → exactly one round trip to `agg_product_day` (check with `mongod` log level 1 or a command listener).
 - [ ] EGP and SAR events on the same day → two `agg_platform_day` documents.
 
@@ -119,5 +119,5 @@ The seven endpoints in `plan.md`.
 ## Phase 11 — Backfill (homework)
 
 **Acceptance**
-- [ ] `python -m cmd.backfill_aggs.main` … rebuilds into `*_rebuild` and swaps; `cmd/backfill_aggs/main.py` contains no wiring.
+- [ ] `python backfill.py` rebuilds into `*_rebuild` and swaps, reusing `server.py`'s constructors.
 - [ ] Running it twice gives identical results; live consumption during the rebuild is not double-counted.

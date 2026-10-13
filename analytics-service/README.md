@@ -39,7 +39,7 @@ Every command below runs **from `analytics-service/`** with the venv's Python (`
 
 **Terminal 1 — the API**
 ```bash
-python -m cmd.api.main
+python server.py
 ```
 ```json
 {"level": "info", "message": "mongo connected", "timestamp": 1791917380392, "db": "quickbite_analytics"}
@@ -95,7 +95,7 @@ More to try:
 | `python -m play.mint_jwt --role system_admin` | 200 for any restaurant |
 | `python -m play.publish_test --raw '{"nope":1}'` | message in `analytics-service.order-events.dlq` |
 | `python -m play.publish_test --routing-key payment.completed` | logged "no handler", acked |
-| `python -m play.check_mongo --indexes` | the four indexes from `repository/indexes.py` |
+| `python -m play.check_mongo --indexes` | the four indexes from `app/analytics/repository.py` |
 
 Stop the API with Ctrl+C: you should see `shutdown requested` → `event consumer stopped` → `shutdown complete`.
 

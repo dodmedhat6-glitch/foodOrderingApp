@@ -77,9 +77,9 @@ GET /api/v1/analytics/restaurants/42/days?from=…&to=…
     Authenticate             cookie | Bearer → verify HS256 → Claims       (401)
     require_restaurant_member path restaurantId == claims.restaurantId     (403 / 400 if malformed)
     require("analytics:read") PermissionsCache.get(restaurantRole)          (403)
-                               └─ miss → CoreRbacClient → core GET /api/roles/{role}/permissions
+                               └─ miss → CoreClient.get_role_permissions → core GET /api/roles/{role}/permissions
     RestaurantDaysQuery      ?from&to as YYYY-MM-DD                        (400 VALIDATION_ERROR)
-  AnalyticsController → AnalyticsService.get_restaurant_days
+  route → AnalyticsService.get_restaurant_days
                            from ≤ to, span ≤ 366                           (400 ANALYTICS_…)
                            repo.find_range → uq_(restaurant_id,date) index
                            project: avgOrderMinor = round_half_up(revenue/orders)

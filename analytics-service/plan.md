@@ -10,7 +10,7 @@ The video builds **one vertical slice, end to end**: one event in, one aggregate
 | `pkg/` | Mongo connect/ping/close; `Broker` Protocol + aio-pika impl (topology, DLX, consume, confirmed publish, stop); httpx client with retry |
 | `lib/` | env, JSON logger, ContextVars, AppError + handlers + 500 boundary, envelope helpers, correlation + access log middleware, JWT auth, api-key guard, RBAC cache + guards, core client, generic event consumer with Mongo dedupe, composition root, graceful shutdown |
 | `app/analytics` | `agg_restaurant_day` entity + repo + indexes; `event_ids` dedupe repo; `order.placed` handler; `AnalyticsService.on_order_placed` / `get_restaurant_days`; request/response DTOs; `GET /api/v1/analytics/restaurants/{restaurantId}/days?from=&to=` |
-| `app/health` | `GET /health` |
+| `server.py` | wiring, `GET /health`, serve, graceful shutdown |
 | `play/` | `mock_core`, `mint_jwt`, `publish_test`, `check_mongo` |
 | Docs | `CLAUDE.md`, `README.md`, this file, `docs/*` |
 
@@ -36,7 +36,7 @@ Ordered so each step reuses the one before. Prompts for each: `docs/ai-prompts.m
    - `GET /restaurants/{id}/summary?from=&to=` — totals over the range, computed from the day rows.
    The two marked *derived* need **no new collection** — only fields on existing ones.
 8. **`rbac.permissions_changed` consumer** — second `ConsumerOptions` on `core.events`, handler calls `PermissionsCache.invalidate(role)`. Note core doesn't emit this event today; adding it to core's outbox is part of the task.
-9. **Backfill** — `cmd/backfill_aggs/main.py` (underscore: `python -m cmd.backfill-aggs.main` is not a valid module path): read orders from each order-service shard (read-only), replay them through `AnalyticsService` *without* the dedupe ledger, into fresh collections, then swap. Only works because the aggregates are sums and counts.
+9. **Backfill** — `backfill.py` at the root, next to `server.py` (as `worker.ts` sits next to `server.ts`): read orders from each order-service shard (read-only), replay them through `AnalyticsService` *without* the dedupe ledger, into fresh collections, then swap. Only works because the aggregates are sums and counts.
 
 ## Deliberately not in either list
 

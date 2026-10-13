@@ -56,7 +56,7 @@ Review your diff against CLAUDE.md §3 (layering), §5 (no inline types in *_ser
 §6 (envelopes, DTOs only), §7 (Mongo rules) and §10 (what to avoid). For each rule, say
 "followed" or show the line that breaks it. Then run:
   grep -rnE "^(from|import) (lib|app)\b" pkg
-  grep -rnE "^(from|import) app\b" lib | grep -v lib/boot
+  grep -rnE "^(from|import) app\b" lib
 Both must print nothing.
 ```
 
@@ -114,7 +114,7 @@ repo methods. For agg_product_day: an order.placed produces one update per line 
 pymongo's bulk_write with UpdateOne operations and ordered=False — one round trip per event —
 and explain what ordered=False changes if one update fails.
 For agg_platform_day: key by (date, currency); explain why summing across currencies is wrong.
-Wire the new repo into AnalyticsService through lib/boot/boot.py, not by importing a global.
+Wire the new repo into AnalyticsService in server.py, not by importing a global.
 ```
 
 ### H5 — derived endpoints (failure rate, delivery average)
@@ -131,7 +131,7 @@ entry with every error code.
 ### H6 — `rbac.permissions_changed` consumer
 
 ```
-Read lib/rbac/cache.py and lib/coreevents/consumer.py. Core does not publish this event today —
+Read lib/auth.py (PermissionsCache) and lib/events.py. Core does not publish this event today —
 confirm that by reading core-service/src/lib/events/events.ts and its outbox, and tell me what
 core would need to change. Then, on this side: a second EventConsumer bound to core.events with
 its own queue (analytics-service.core-events) and DLQ, whose single handler calls
@@ -142,12 +142,12 @@ PermissionsCache.invalidate(role). Explain whether this handler needs the Mongo 
 ### H7 — backfill command
 
 ```
-Design cmd/backfill_aggs/main.py before writing it. It must: read placed orders from each
+Design backfill.py (service root, next to server.py) before writing it. It must: read placed orders from each
 order-service shard read-only; rebuild aggregates into *_rebuild collections through the same
 AnalyticsService methods the consumer uses; then swap collections. Explain why this only works
 because we store sums and counts, how to avoid double-counting events the live consumer applies
-during the rebuild, and why it shouldn't touch event_ids. Keep cmd/backfill_aggs/main.py as
-small as cmd/api/main.py — the wiring goes in a run() under lib/boot.
+during the rebuild, and why it shouldn't touch event_ids. Reuse the constructors
+server.py uses; don't duplicate business logic.
 ```
 
 ---
@@ -156,9 +156,9 @@ small as cmd/api/main.py — the wiring goes in a run() under lib/boot.
 
 - writes code before summarizing the files you asked it to read;
 - imports `motor`, `beanie`, `mongoengine`, `sqlalchemy`, a DI framework, or Redis;
-- puts a collection name in `pkg/`, or imports `app` from `lib/` outside `lib/boot`;
+- puts a collection name in `pkg/`, or imports `app` from `lib/`;
 - declares a dataclass or `BaseModel` in a `*_service.py`, `*_controller.py` or `*_repo.py`;
-- reads `os.environ` outside `lib/config/env.py`;
+- reads `os.environ` outside `lib/config.py`;
 - does read-modify-write (`find_one`, add in Python, `replace_one`) instead of `$inc`;
 - stores an average, or uses `float`/`round()` for money;
 - returns a dict or an entity from a controller;
