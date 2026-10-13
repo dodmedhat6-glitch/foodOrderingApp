@@ -369,7 +369,7 @@ directly on an old database fails with "migration directory is corrupt".
   throwing them.
 - Refresh tokens are not rotated or revocable; reset OTPs are not single-use.
 - No automated test suite; verification lives in `order-service/play/` scripts
-  (untracked) and manual passes recorded in `order-service/docs/implementation-plan.md`.
+  (untracked) and manual passes recorded in `order-service/docs/status.md`.
 
 ## Documentation
 
