@@ -1,0 +1,57 @@
+[project]
+name = "analytics-service"
+version = "0.1.0"
+description = "QuickBite analytics: per-day rollups of order activity, fed by order-service events."
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115",          # >=0.115 for query-parameter models (dto/*_request.py)
+    "uvicorn>=0.30",
+    "pymongo>=4.13",           # >=4.13 for the GA AsyncMongoClient
+    "aio-pika>=9.4",
+    "pydantic>=2.7",
+    "pydantic-settings>=2.3",
+    "PyJWT>=2.8",
+    "httpx>=0.27",
+]
+
+[project.optional-dependencies]
+dev = [
+    "ruff>=0.6",
+    "mypy>=1.11",
+]
+
+# Not an installable distribution: the service runs from its root with
+# `python -m cmd.api.main`, exactly like `tsx src/server.ts` runs from the
+# Node service root. No build backend, no src/ layout, no entry points.
+[tool.uv]
+package = false
+
+[tool.ruff]
+line-length = 110
+target-version = "py311"
+extend-exclude = [".venv"]
+
+[tool.ruff.lint]
+select = [
+    "E", "W",   # pycodestyle
+    "F",        # pyflakes
+    "I",        # import order
+    "B",        # bugbear
+    "UP",       # pyupgrade
+    "ASYNC",    # blocking calls inside async def
+    "RUF",
+]
+ignore = [
+    "B008",     # FastAPI's Depends()/Query() in defaults is the framework's idiom
+    "RUF001", "RUF002", "RUF003",  # em dashes and arrows in prose are deliberate
+]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+exclude = ["^\\.venv/"]
+plugins = ["pydantic.mypy"]
+
+[tool.pydantic-mypy]
+init_forbid_extra = true
+init_typed = true

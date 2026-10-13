@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+
+# Environment
+.env
+!.env.example
+
+# Dev aids — mock-core, mint-jwt, publish-test, check-mongo. Not part of the
+# service; see README.md for what they do and docs/folder-structure.md for why
+# they are not under cmd/.
+play/
+
+# Logs
+*.log
