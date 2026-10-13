@@ -47,7 +47,7 @@ export function branchRejectingOrdersKey(branchId: number): string {
 
 /**
  * Set when a restaurant is suspended; its pending orders are flagged for
- * review by the ops team (docs/implementation-plan.md Phase 1).
+ * review by the ops team (docs/status.md Phase 1).
  */
 export function restaurantSuspendedKey(restaurantId: number): string {
     return `core:restaurant:suspended:${restaurantId}`;

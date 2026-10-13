@@ -26,7 +26,7 @@ import {StragglerRowError} from "../errors";
 
 /**
  * Moves prior-year data from a region's hot shard to its archive twin
- * (docs/implementation-plan.md Phase 5, CLAUDE.md s7/Archival).
+ * (docs/status.md Phase 5, CLAUDE.md s7/Archival).
  *
  * **Order-driven, not table-driven.** The plan sketched one pass per table by
  * `created_at`, but a refund created in January against a December order would

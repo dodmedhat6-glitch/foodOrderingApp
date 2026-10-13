@@ -155,7 +155,7 @@ export async function selectWebhookEvents(
  * `ON CONFLICT DO NOTHING` with no target is what makes a re-run after a crash
  * safe: the archive commits before the hot delete, so a crash in between
  * leaves rows in both places, and the next run re-inserts them as no-ops
- * (docs/implementation-plan.md Phase 5). Ids are copied verbatim — they were
+ * (docs/status.md Phase 5). Ids are copied verbatim — they were
  * minted by the hot shard's sequence, which the archive never advances.
  */
 export async function insertRows(

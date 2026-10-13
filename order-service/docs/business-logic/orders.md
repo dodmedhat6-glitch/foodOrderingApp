@@ -1,272 +1,74 @@
-# Business Logic — Orders Module
+# Orders
 
-Owner module: `app/order/`
+Code: `app/order/`.
 
-Responsible for the customer-facing order placement, the order header lifecycle, and the read paths used by customers, restaurants, and admins.
+## Placing an order (`POST /orders`)
 
----
+1. Check the basket: 1–100 lines, quantity 1–50, no product listed twice.
+2. Read the branch from core (cached). The branch must be active and accepting
+   orders, the restaurant must be `active`, and the branch's country must match
+   the request's region.
+3. Read the address from core. It must belong to the caller.
+4. Read prices and stock from core (cached). Unavailable or short lines → 409
+   `OutOfStock`, listing the lines.
+5. Price it: `subtotal` = sum of lines, `delivery_fee` from the branch,
+   `service_fee` = a flat 10 minor units, `total` = all three.
+6. **Reserve the stock in core** before writing anything here.
+7. Write the order and its items in one transaction. If that fails, give the
+   stock back to core.
+8. COD → the order starts as `placed` and the kitchen is notified.
+   Online → it starts as `pending_payment`, and a Kashier session is opened and
+   returned as `payment.redirectUrl`. The kitchen hears about it only once the
+   payment is captured.
 
-## 1. Status machine
+The request needs an `Idempotency-Key`, so a retry never reserves stock twice.
 
-```
-        ┌──── pending_payment ──── (online only)
-        │           │
-        │           │ payment captured (Kashier webhook)
-        │           ▼
-        └──────► placed ────► accepted ────► preparing ────► ready ────► assigned ────► picked ────► delivered
-                    │             │              │              │            │             │
-                    │             │              │              │            │             │
-                    │             ▼              ▼              ▼            ▼             ▼
-                    │          rejected      cancelled      cancelled    cancelled     (terminal)
-                    │
-                    └──► cancelled (customer cancels before restaurant accepts)
-```
-
-### State definitions
-
-| Status            | Meaning                                                                            | Who can move it                                                  |
-| ----------------- | ---------------------------------------------------------------------------------- | ---------------------------------------------------------------- |
-| `pending_payment` | Online order created; awaiting Kashier confirmation                                | system (webhook), customer (cancel within 15 min)                |
-| `placed`          | Restaurant has the order in its queue                                              | system (transition only)                                         |
-| `accepted`        | Restaurant accepted; cooking will start                                            | restaurant (manager/staff/owner)                                 |
-| `rejected`        | Restaurant declined                                                                | restaurant — terminal; triggers refund (online) or void (cod)    |
-| `preparing`       | Active cooking                                                                     | restaurant                                                       |
-| `ready`           | Food ready for pickup; eligible for delivery assignment                            | restaurant                                                       |
-| `assigned`        | Delivery row created and a delivery agent assigned                                 | system (assignment service) / system_admin (manual)              |
-| `picked`          | Agent confirmed pickup at the branch                                               | delivery agent                                                   |
-| `delivered`       | Customer received order; money settles                                             | delivery agent — terminal                                        |
-| `cancelled`       | Cancelled before delivery                                                          | system / restaurant (with reason) / customer (limited window)    |
-
-### Transition rules
-
-- Single endpoint `PATCH /orders/{orderId}/status` updates restaurant-side state. Body: `{ status }`. Service validates the requested target is **legal from current status** and **allowed for the actor**.
-- Forbidden transitions return **409**.
-- Each transition stamps the corresponding `<verb>_at` column inside the same trx.
-- Each transition publishes a WebSocket event to `customer:<id>`, `branch:<id>`, and (where relevant) `agent:<id>`.
-
-### Allowed transitions matrix (target by current)
-
-| from \ to        | accepted | rejected | preparing | ready | assigned | picked | delivered | cancelled |
-| ---------------- | -------- | -------- | --------- | ----- | -------- | ------ | --------- | --------- |
-| `placed`         | ✅ rest  | ✅ rest  |           |       |          |        |           | ✅ cust*  |
-| `accepted`       |          |          | ✅ rest   |       |          |        |           | ✅ rest   |
-| `preparing`      |          |          |           | ✅ rest|          |        |           | ✅ rest   |
-| `ready`          |          |          |           |       | ✅ system|        |           | ✅ rest   |
-| `assigned`       |          |          |           |       |          | ✅ ag  |           | ✅ admin  |
-| `picked`         |          |          |           |       |          |        | ✅ ag     |           |
-
-\* customer cancel window: until `accepted_at` is set OR within 60s of `placed`.
-
----
-
-## 2. POST /orders — placement (the most critical path)
-
-### Inputs (request DTO)
-
-```ts
-class CreateOrderRequestDTO {
-  branchId: number;             // required, validated against core-cached branch metadata
-  customerAddressId: number;    // required, validated via core-client
-  paymentMethod: 'online' | 'cod';
-  items: Array<{ productId: number; quantity: number }>;  // required, non-empty
-}
-```
-
-Header: `Idempotency-Key` (required, `idempotency({strict: true})` middleware).
-
-### Algorithm
-
-1. **Resolve region**. From `X-Region` / `?region=` / cookie, or derived from the chosen `branchId` via the cached branch metadata. The order goes to the **branch's region (country)** shard. With country-level shards, the customer is almost always in the same country as the branch.
-2. **Validate branch** via cache then `core-client`. If branch is `accept_orders=false` or restaurant `status != 'active'` → 409 `BranchNotAcceptingOrders`.
-3. **Validate address** via `core-client`. Capture `lat/lng/address_text` for the snapshot.
-4. **Fetch product prices/stock** for the requested items in **a single batch call** to `core-client.getBranchProducts(branchId, productIds)`. If any product is missing, unavailable, or `stock < quantity` → 409 with offending product list.
-5. **Compute money**:
-   - `subtotal = Σ unitPrice × quantity` (all in minor units).
-   - `delivery_fee = branch.deliveryFee` (cached).
-   - `service_fee = SERVICE_FEE_MINOR` — a flat platform fee, the same in every region (`app/order/constants.ts`). Not a percentage and not config: it is one number today, and the order row stores the fee it was actually charged, so changing the constant never reprices an existing order.
-   - `total = subtotal + delivery_fee + service_fee`.
-6. **Reserve the stock** via `core-client.reserveStock(branchId, items)` — **before** the transaction opens, not after it commits. Core's locked decrement is the authority on who got the last unit; the step-4 pre-check is a fast-fail against a projection that can be stale by construction, so a 409 here is ordinary and is returned in the same `OutOfStock` shape.
-7. **In one trx on the branch's region**:
-   - Insert `orders` with `status = paymentMethod === 'online' ? 'pending_payment' : 'placed'`.
-   - Insert `order_items` (one INSERT … VALUES … with multiple rows).
-   - For COD: insert `transactions(type='cod_collection', status='pending', amount=total, src_acc_id=customer, dst_acc_id=restaurantOwner)`.
-   - **Commit.** If anything in this step fails — including opening the transaction, which is where a dead shard fails — the reserved units are handed back with `core-client.releaseStock(branchId, items)` and the original error is rethrown.
-
-   Why this order: core's decrement is a separate database that cannot join our transaction, so one of the two goes first and the loser needs a compensation. Reserving first means a failure compensates by *releasing stock nobody saw*; committing first means it compensates by *cancelling an order the customer was already told about and the kitchen may already have on screen*. The second is both worse and likelier — losing a race for the last unit is routine, failing our own single-shard insert is not. Reserving first costs no lock time either: the round trip happens before the transaction opens rather than inside it.
-
-   The release is not transactional and core has no reservations ledger to match it against, so it must run **at most once per reserve**. Strict idempotency on `POST /orders` is what guarantees that: a replayed request is answered from the recorded response and never reaches the reserve.
-8. For `online`: hand off to payment service to create a Kashier session (separate endpoint `POST /payments/init`, or auto-trigger from the same controller — see §3).
-9. Publish WS `order.created` to `branch:<branchId>` (only for COD; online waits for capture).
-10. Return the `OrderResponseDTO`.
-
-### Concurrency / race conditions
-
-- Two simultaneous orders racing the same last unit of stock: handled in `core-service` reserveStock (atomic decrement under `FOR UPDATE` in ascending product id order; returns 409 if any item underflows). Because the reserve now precedes the insert, the loser never has an order row at all — there is nothing to void.
-- A retried `POST /orders` after a timeout: the idempotency record answers it, so the reserve does not run twice. This is the single guard against a double decrement; core cannot detect the duplicate itself.
-- Idempotency: same key + same body within 24h → returns the original response. Same key + **different** body → 409 `IdempotencyConflict` (we hash the request body).
-
-### Failure modes
-
-- Kashier creation fails after order insert → order remains in `pending_payment`. The customer can retry `POST /payments/init` (also idempotent) or the order auto-cancels after 15 min via a background sweep job.
-
----
-
-## 3. POST /orders — online vs COD execution
-
-The simplest UX is to keep `POST /orders` and `POST /payments/init` as **two separate calls** — the order returns its `publicId`, the client then calls `POST /payments/init { orderId }`. This keeps endpoints small and idempotent independently.
-
-(An alternate endpoint `POST /orders/with-payment` could combine both for a single round-trip; deferred unless mobile asks.)
-
----
-
-## 4. GET /orders/{orderId} and GET /restaurants/{restaurantId}/branches/{branchId}/orders/{orderId}
-
-The same read under two paths, because the two audiences are authorized by
-different questions:
-
-- **Flat** — customer (own), delivery_agent (the one they carry), admin. The
-  subject is the JWT, so there is nothing in the path to authorize against and
-  the ownership check in the service is the whole of it.
-- **Branch-scoped** — restaurant staff. The order is a tenant resource and the
-  answer is `orders:read` from core's catalog, so the tenancy goes in the path
-  where `requireRestaurantMember` and `requireBranchAccess` can read it as
-  middleware, exactly as in `core-service`.
-
-The scoped path does not merely *check* the pair — it carries it into the
-repository, so the lookup filters on `(restaurant_id, branch_id, public_id)`.
-An order id from a neighbouring branch of the same restaurant therefore matches
-no row at all, instead of being fetched and then rejected. Same answer to the
-caller (404), stronger guarantee: it no longer depends on remembering to run a
-check after the read.
-
-- `orderId` here is the **public_id** (UUID).
-- Lookup is by `public_id` index, single shard.
-- Region resolution: same priority (`?region=` / `X-Region` / cookie). A customer reading an order in their own country passes `X-Region` (set by the gateway) or the server derives it from the order's `public_id` only if we ever add a region prefix — today we require the region to be supplied.
-- Authorization: customer == `order.customer_id`; restaurant user must own the restaurant or be a member of `branch_id`; admin sees all.
-- Response includes:
-  - Order header (DTO).
-  - Items.
-  - Latest delivery (if any).
-  - Payment summary (status of latest `transaction(type='charge'|'cod_collection')`).
-- All in **one** repository call (single SQL with joins). No N+1.
-
----
-
-## 5. GET /customer/orders?year=YYYY
-
-- Cursor-paginated.
-- Defaults `year` to the current year if omitted.
-- For current year → query `orders` on customer's home shard via `idx_orders_customer_id_created_at`.
-- For historical years → route to the **archive cluster** (Phase 5) for the same region. Same indexes, same shape.
-- Cross-country lookup is not optimized for in this milestone (extremely rare).
-
----
-
-## 6. GET /restaurants/{restaurantId}/branches/{branchId}/orders
-
-- The branch is a **path segment**, not a query param: it is what the
-  authorization middleware checks, and a value two different layers each have
-  to go looking for in the query string is a value they can disagree about.
-- Filters: `status`, `from`, `to`.
-- Cursor pagination (`createdAt` desc).
-- Authorization: `requireRestaurantMember("restaurantId")` +
-  `requireBranchAccess("branchId")` + `rbac({orders:read})`.
-- The query filters on `(restaurant_id, branch_id)`, so a branch that does not
-  belong to the restaurant in the path returns an empty page rather than
-  another tenant's queue.
-- Hot endpoint → backed by `idx_orders_branch_status_created_at` + `withCache(10)` for the typical "pending in this branch" page.
-- Cache invalidated on every status transition for that branch (the service clears `restaurant:orders:<branchId>:*`).
-
----
-
-## 7. PATCH /orders/{orderId}/status (and the branch-scoped copy)
-
-- Still **one endpoint per audience**, not one per transition (CLAUDE.md §4).
-  Restaurant staff go through
-  `PATCH /restaurants/{restaurantId}/branches/{branchId}/orders/{orderId}/status`;
-  customers and agents through the flat path, which rejects `restaurant_user`
-  so it cannot become a way around the permission check.
-- On the scoped route the required permission is derived from the **requested
-  target** (`orders:accept` / `orders:update` / `orders:cancel` — §11), because
-  core's catalog splits a restaurant's order rights three ways and `staff` holds
-  only two of them. The derivation happens in `rbac()` before anything is
-  written; which transitions are *legal* is still the status machine's answer.
-- The server inspects `currentStatus` and the actor's role to decide if the requested transition is allowed.
-- Each transition uses a small helper `assertTransition(from, to, actorContext)` that throws `InvalidStatusTransition` otherwise.
-- Side effects per transition:
-  - `accepted` → stamp `accepted_at`; WS to customer.
-  - `rejected` → stamp `rejected_at`; trigger refund or void COD; WS to customer.
-  - `preparing` → stamp; WS.
-  - `ready` → stamp; **enqueue auto-assignment** (delivery service).
-  - `assigned` → only system writes this status (assignment service). Manual admin override goes through `POST /deliveries/assign/{orderId}` not this endpoint.
-  - `cancelled` → stamp `cancelled_at`, body must include `reason`. If online & captured → trigger refund. If COD → void the pending `cod_collection` transaction.
-
----
-
-## 8. Invariants
-
-1. `total = subtotal + delivery_fee + service_fee` always.
-2. `commission ≤ subtotal`.
-3. The status sequence is monotonic (no jumping back).
-4. `delivered_at IS NOT NULL` ⇒ all dependent rows: `transactions(type='charge', status='succeeded')` exists, `restaurant_balances` updated, `agent_earnings` row exists.
-5. `pending_payment` orders older than 15 min are cancelled by a background sweep.
-6. A customer cannot read another customer's order, even with the public_id.
-7. A restaurant user cannot read orders for branches they aren't a member of (unless owner).
-8. A branch-scoped read never returns a row outside `(restaurant_id, branch_id)`
-   — the pair is in the `WHERE` clause, not only in a guard.
-
----
-
-## 9. Cancellation policy (codified)
-
-- **Customer cancellation**: allowed only while `status IN ('pending_payment', 'placed')` AND no more than 60s after `placed_at`. After that, the customer can't cancel; they must call support.
-- **Restaurant cancellation**: allowed at any time before `picked`. Requires a `reason`. Triggers refund/void.
-- **System cancellation**: timeouts (`pending_payment` > 15 min); failed assignment after max retries (see Deliveries module).
-
----
-
-## 10. Refund handling on cancellation
-
-- If the order was online and a `transaction(type='charge', status='succeeded')` exists → call payment service's `refund(orderId, amount=total)`. This is async (Kashier processes; we get a webhook).
-- If COD with no money collected yet → flip the pending `cod_collection` to `failed` and write `transaction(type='adjustment', amount=0, ...)` for the audit trail (no money moved).
-
----
-
-## 11. RBAC
-
-| Action                                      | Roles allowed                                                     |
-| ------------------------------------------- | ------------------------------------------------------------------ |
-| `POST /orders`                              | `customer`                                                         |
-| `GET /orders/{id}`                          | `customer` (own), `delivery_agent` (own), `system_admin`           |
-| `GET /customer/orders`                      | `customer`                                                         |
-| `PATCH /orders/{id}/status` → cancelled     | `customer` (own, inside window), `system_admin`                    |
-| `PATCH /orders/{id}/status` → picked/delivered | `delivery_agent` (the assigned one)                             |
-| `GET R/B/orders`                            | `restaurant_user` (`orders:read`), `system_admin`                  |
-| `GET R/B/orders/{id}`                       | `restaurant_user` (`orders:read`), `system_admin`                  |
-| `PATCH R/B/orders/{id}/status` → accept/reject | `restaurant_user` with `orders:accept`                          |
-| `PATCH R/B/orders/{id}/status` → preparing/ready | `restaurant_user` with `orders:update`                        |
-| `PATCH R/B/orders/{id}/status` → cancelled  | `restaurant_user` with `orders:cancel`                             |
-
-`R/B` abbreviates `/restaurants/{restaurantId}/branches/{branchId}`.
-
-Permission seed (added to core's RBAC seed migration):
+## Status machine
 
 ```
-orders:read, orders:accept, orders:update, orders:cancel
+pending_payment ──(payment captured)──> placed ──> accepted ──> preparing ──> ready ──> assigned ──> picked ──> delivered
+       │                                  │  └──> rejected        │             │         │  ↑
+       └──> cancelled                     └──> cancelled          └─> cancelled └─> cancelled  └── unclaim (back to ready)
 ```
 
-Mapped to roles:
+| Who | Can do |
+| --- | --- |
+| Restaurant | `placed → accepted / rejected`, `accepted → preparing`, `preparing → ready`, cancel from `accepted`, `preparing`, `ready` |
+| Customer | Cancel from `pending_payment` any time; from `placed` within 60s of placing it, and only before the restaurant accepts |
+| Agent | `assigned → picked`, `picked → delivered` (only on their own order) |
+| System | `pending_payment → placed` (payment captured), `ready → assigned` (claim), cancel an unpaid order (expiry) |
+| Admin | Any edge that exists |
 
-- `owner` → all four.
-- `branch_manager` → all four.
-- `staff` → `orders:read`, `orders:update`, `orders:accept` (no cancel).
+- `rejected` and `cancelled` need a `reason`.
+- Every change is a compare-and-set on the current status, so two people acting
+  at once get one success and one 409.
+- Each status stamps its own `<status>_at` column.
 
----
+## Side effects of a transition
 
-## 12. WebSocket events emitted
+- **WebSocket:** `order.status_changed` (or `order.cancelled`) to the customer,
+  the branch and the assigned agent.
+- **Cancel or reject before `preparing`:** the reserved stock goes back to core.
+  After that the food is already made, so the stock stays used.
+- **Cancel or reject a paid online order:** it is refunded automatically.
+- **`preparing` or `ready`:** the order becomes available to agents (see
+  [deliveries.md](deliveries.md)).
+- **`delivered`:** the money settles (see [restaurant-finance.md](restaurant-finance.md)).
+- The restaurant's cached order lists for that branch are cleared.
 
-| Event             | Channel                        | Payload (response DTO)                              |
-| ----------------- | ------------------------------ | --------------------------------------------------- |
-| `order.created`   | `branch:<id>`                  | `OrderSummaryResponseDTO`                           |
-| `order.status_changed` | `customer:<id>`, `branch:<id>` | `{ orderId, status, ts }`                       |
-| `order.cancelled` | `customer:<id>`, `branch:<id>` | `{ orderId, reason, ts }`                           |
+## Reads
+
+- **Customer history** (`GET /customer/orders?year=`): one year at a time,
+  newest first. A previous year also reads the archive.
+- **Restaurant dashboard**: filter by status and date range. Cached for 10s and
+  cleared on every change. A `from` date in a previous year also reads the archive.
+- **Order detail**: header, items, payment summary (from the ledger), and the
+  agent's name once one is assigned. A customer sees only their own orders, an
+  agent only orders assigned to them, a restaurant user only their own
+  branches (owners see every branch).
+
+## Partitions
+
+`orders` has one partition per month. A worker job creates the next three
+months daily. Lookups by public id go straight to one partition, because the
+UUIDv7 carries its creation time.
