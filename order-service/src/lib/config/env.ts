@@ -37,6 +37,19 @@ const baseSchema = z.object({
     RABBITMQ_CORE_EVENTS_DLQ: z.string().default("order-service.core-events.dlq"),
     RABBITMQ_PREFETCH: z.string().default("32"),
 
+    // ---- outbound events (transactional outbox -> RabbitMQ) ----
+    // Our own exchange, declared by the worker. Not `core.events`: an
+    // exchange belongs to its publisher, and sharing one would let a
+    // consumer's `#` binding pick up another service's events by accident.
+    RABBITMQ_ORDER_EVENTS_EXCHANGE: z.string().default("order.events"),
+    // How often the worker drains every shard's events_outbox. This is the
+    // floor on event latency, so it stays small; an idle tick is one indexed
+    // query per shard that returns nothing.
+    OUTBOUND_EVENTS_DRAIN_TICK_SEC: z.string().default("2"),
+    // Rows claimed per shard per tick. The batch's locks are held until every
+    // row in it is published, so bigger is not free.
+    OUTBOUND_EVENTS_BATCH_SIZE: z.string().default("100"),
+
     CORE_SERVICE_BASE_URL: z.string(),
     CORE_INTERNAL_API_KEY: z.string(),
 
@@ -230,6 +243,12 @@ export const env = {
         dlx: parsed.RABBITMQ_CORE_EVENTS_DLX,
         dlq: parsed.RABBITMQ_CORE_EVENTS_DLQ,
         prefetch: Number(parsed.RABBITMQ_PREFETCH),
+    },
+
+    outboundEvents: {
+        exchange: parsed.RABBITMQ_ORDER_EVENTS_EXCHANGE,
+        drainTickSec: Number(parsed.OUTBOUND_EVENTS_DRAIN_TICK_SEC),
+        batchSize: Number(parsed.OUTBOUND_EVENTS_BATCH_SIZE),
     },
 
     core: {

@@ -83,6 +83,7 @@ src/
     core-client/      # sync HTTP client to core-service — NEW vs core (scaffolded in Phase 0)
     core-events/      # inbound async consumer (RabbitMQ): cache invalidation handlers — NEW vs core
     messaging/        # AMQP connection, channel lifecycle, DI registration — NEW vs core
+    events/           # outbound transactional outbox: event-types, types, outbox.repo, outbox-drain, jobs
     jobs/             # job registry + scheduler only; the jobs themselves live in app/<module>/jobs.ts
   pkg/                      # reusable, app-agnostic, framework-free
     cache/       # cache.interface.ts, redis.ts
@@ -351,7 +352,7 @@ The default export `defaultDb` exists only for migrations and shared (non-sharde
 
 ### Async with `core-service` (RabbitMQ)
 
-This service does **not** emit outbound async events to anyone in this milestone. The only async path is **inbound from `core-service` over RabbitMQ** for cache invalidation and authorization invalidation.
+Two async paths: **inbound from `core-service`** (this section — cache invalidation) and **outbound to analytics-service** (see "Outbound events" below).
 
 - Topology:
   - Topic exchange: `core.events` (durable, declared by core).
@@ -372,7 +373,18 @@ This service does **not** emit outbound async events to anyone in this milestone
 - Delivery semantics: **at-least-once**. Manual ack after the handler commits. Duplicates are expected.
 - Dedupe via Redis SETNX on `core-events:dedupe:<eventId>` (24h TTL): set-if-absent before dispatching the handler; if not fresh, ack and skip. Safe to expire because every handler is idempotent — a patch applies the same committed values twice, a delete deletes nothing the second time.
 - Authentication: AMQP credentials (per-service vhost user/pass from env). No HMAC on the wire — the broker is trusted.
-- There is **no** outbound `events_outbox` in this service. If a future consumer requires it, add both the table and a dispatcher then.
+
+### Outbound events (`order.events`)
+
+The publisher side mirrors core's outbox (`core-service/src/app/outbox/`), adapted to sharding. Everything lives in `lib/events/`:
+
+- `events_outbox` table, **per shard, no `region` column** — each shard drains its own outbox, so the connection already is the region. The region a consumer needs is in the payload.
+- **Enqueue in the domain trx.** `enqueueOutboxEvent(input, trx)` must get the transaction that performs the write the event describes. Never publish from a request handler.
+- **Drain** (`outbox-drain.ts`, registered by `lib/events/jobs.ts`, run by `worker.ts`): per region, `FOR UPDATE SKIP LOCKED` claim → publish with confirms → one bulk `published` update → commit. A publish error marks that row (`attempts++`, `failed` at 5) and **breaks out of the batch** — the broker is sick, don't hold the locks on the rest. `publishTimeoutMs` bounds a publish while the broker is down.
+- **Exchange** `order.events` (topic, durable, declared by the worker). Not `core.events`: a publisher owns its exchange.
+- **Envelope** is core's: `{eventId, eventType, occurredAt, entityType, entityId, payload}`; `occurredAt` is the outbox row's `created_at`. Consumers dedupe on `eventId` — delivery is at-least-once.
+- **Catalog** (`event-types.ts`): `order.placed` only, emitted when an order *becomes* `placed` — in `placeOrder` for COD, in `transitionInTrx` (payment capture) for online. A `pending_payment` row emits nothing. Payload type: `OrderPlacedPayload` in `types.ts`; builder in `app/order/events.ts`.
+- Env: `RABBITMQ_ORDER_EVENTS_EXCHANGE`, `OUTBOUND_EVENTS_DRAIN_TICK_SEC`, `OUTBOUND_EVENTS_BATCH_SIZE`.
 
 ### Payload contract: patch, don't drop
 
@@ -542,8 +554,8 @@ Implement one module end-to-end before starting the next. Order: **orders → pa
 
 ## 13. Out of scope (do not build)
 
-- Analytics service / analytics DB and any async event emission to it (separate service, future).
-- Outbound async events from this service to **any** consumer in this milestone — async with core-service is **inbound only** (cache invalidation).
+- The analytics service itself — it lives in `analytics-service/` and owns its own MongoDB. This service only publishes to it (§8 "Outbound events").
+- Outbound events beyond the `order.events` catalog in `lib/events/event-types.ts`. Add an event type there, enqueue it in the owning transaction, and nothing else.
 - DevOps / deploy infra, observability stack, benchmark/perf testing — separate effort, future.
 - Read replicas — single primary per region for now; revisit when traffic justifies it.
 - Recommendations, loyalty, AI delivery optimization, reviews (PRD §13).
