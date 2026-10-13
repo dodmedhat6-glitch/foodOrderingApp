@@ -107,7 +107,7 @@ export class ArchivalService {
 
             const batchStart = Date.now();
             try {
-                const moved = await this.moveOrderBatch(refs, columns, hot, archive);
+                const moved = await this.moveOrderBatch(refs, boundary, columns, hot, archive);
                 for (const [table, n] of Object.entries(moved)) tally(table, n);
                 result.orders += refs.length;
                 result.batches++;
@@ -138,12 +138,13 @@ export class ArchivalService {
     /** One batch of orders: copy into the archive, commit, then delete from hot. */
     private moveOrderBatch = async (
         refs: ArchivableOrderRef[],
+        boundary: Date,
         columns: Map<ArchivedTable, TableColumns>,
         hot: Knex,
         archive: Knex,
     ): Promise<Record<string, number>> => {
         const orderIds = refs.map((r) => r.id);
-        const orders = await selectOrders(refs, columns.get("orders")!, hot);
+        const orders = await selectOrders(orderIds, boundary, columns.get("orders")!, hot);
         const children = new Map<ArchivedTable, Record<string, unknown>[]>();
         for (const table of ORDER_CHILD_TABLES) {
             children.set(table, await selectByOrderIds(table, orderIds, columns.get(table)!, hot));
@@ -176,7 +177,7 @@ export class ArchivalService {
                     throw new StragglerRowError(`${table} ids ${uncopied.join(",")} were not copied`);
                 }
             }
-            const deletedOrders = await deleteOrders(refs, htrx);
+            const deletedOrders = await deleteOrders(orderIds, boundary, htrx);
             if (deletedOrders !== orders.length) {
                 throw new StragglerRowError(`expected to delete ${orders.length} orders, deleted ${deletedOrders}`);
             }

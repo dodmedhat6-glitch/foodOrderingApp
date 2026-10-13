@@ -15,7 +15,8 @@ function toEntity(row: any): ProductBranchDetails {
     });
 }
 
-export async function updateBranchDetails(branchId: number, productId: number, data: {price?: number, stock?: number, isAvailable?: boolean}, conn: Knex = db): Promise<ProductBranchDetails> {
+/** Undefined when the product is not sold at that branch (no details row). */
+export async function updateBranchDetails(branchId: number, productId: number, data: {price?: number, stock?: number, isAvailable?: boolean}, conn: Knex = db): Promise<ProductBranchDetails | undefined> {
     const [row] = await conn("product_branch_details")
         .where("branch_id", branchId)
         .where("product_id", productId)
@@ -25,7 +26,7 @@ export async function updateBranchDetails(branchId: number, productId: number, d
             is_available: data.isAvailable,
         })
         .returning(PBD_COLUMNS);
-    return toEntity(row);
+    return row ? toEntity(row) : undefined;
 }
 
 export interface ReserveStockLine {
