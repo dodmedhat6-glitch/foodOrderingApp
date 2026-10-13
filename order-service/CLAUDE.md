@@ -124,7 +124,7 @@ If you find yourself importing `app/...` inside `pkg/` or `lib/`, **stop and ref
 - Columns: `snake_case`. Boolean prefixed with `is_`.
 - Primary keys: `id BIGSERIAL` (use `BIGINT` for FK columns).
 - Foreign key constraints: `fk_<child_table>_<column>` → e.g. `fk_orders_customer_id`.
-- Indexes: `idx_<table>_<col>[_<col>...]` for btree; `idx_<table>_<col>_gist` for GIST. (No GIST index exists today — there is no PostGIS, and no spatial column either: agent proximity is never a SQL query. Presence lives only in Redis and the spatial index is Redis `GEO` — `GEOSEARCH ... BYRADIUS ... ASC` from the branch's coordinates, see `docs/database-design.md` §3.8 and `pkg/presence/`. The `pkg/utils/geo.ts` haversine is for *pricing* an earning at settlement, not for the dispatch search.)
+- Indexes: `idx_<table>_<col>[_<col>...]` for btree; `idx_<table>_<col>_gist` for GIST. (No GIST index exists today — there is no PostGIS, and no spatial column either: agent proximity is never a SQL query. Presence lives only in Redis and the spatial index is Redis `GEO` — `GEOSEARCH ... BYRADIUS ... ASC` from the branch's coordinates, see `docs/business-logic/agents.md` and `pkg/presence/`. The `pkg/utils/geo.ts` haversine is for *pricing* an earning at settlement, not for the dispatch search.)
 - Unique constraints: `uq_<table>_<col>[_<col>...]`.
 - Check constraints inline; enum-like columns use `TEXT NOT NULL CHECK(col IN (...))` to match the core-service pattern (avoid native PG enums except for currency, which already exists).
 - Timestamps: `created_at`, `updated_at`, `<verb>_at` (e.g. `accepted_at`, `picked_at`, `delivered_at`). All `TIMESTAMP NOT NULL` unless modelling absence (use `TIMESTAMP NULL`).
@@ -273,7 +273,7 @@ Swapping in `pg_partman` later means replacing the maintenance job with `create_
 
 ### Archival
 
-- Per the PRD, only the **current year**'s orders/payments are queryable from the hot DB. Older rows are moved to a **separate cold Postgres database per region** (`order_service_archive` cluster, one per region — same shard topology as the hot DB). The archival worker is implemented in this milestone — see `docs/implementation-plan.md` Phase 5.
+- Per the PRD, only the **current year**'s orders/payments are queryable from the hot DB. Older rows are moved to a **separate cold Postgres database per region** (`order_service_archive` cluster, one per region — same shard topology as the hot DB). The archival worker is `app/archival/` — see `docs/business-logic/archival.md`.
 
 ---
 
@@ -364,11 +364,11 @@ This service does **not** emit outbound async events to anyone in this milestone
   - `core.restaurant.invalidated` → delete `core:branch:*` (the restaurant's trading status reaches us only inside the branch projection) + the suspended flag. Nothing to patch: the event doesn't carry the status.
   - `core.address.invalidated`, `core.user.invalidated` → registered no-ops; neither is cached.
 
-- **Do not** write handlers or bindings for `product.stock.changed`, `product.price.changed`, `branch.deactivated`, `restaurant.suspended` or `rbac.permissions_changed`. Earlier drafts of this file and `docs/implementation-plan.md` specified them, but core emits none of them, and `product.#`-style bindings match none of its routing keys — a service configured that way consumes nothing at all. What follows from that:
+- **Do not** write handlers or bindings for `product.stock.changed`, `product.price.changed`, `branch.deactivated`, `restaurant.suspended` or `rbac.permissions_changed`. Earlier drafts of this file and of the implementation plan specified them, but core emits none of them, and `product.#`-style bindings match none of its routing keys — a service configured that way consumes nothing at all. What follows from that:
   - The reject-new-orders flag **is** event-driven, but off the enriched `core.branch.invalidated` payload rather than a distinct `branch.deactivated` event — see "Payload contract" below. A branch core has just closed therefore stops taking orders on the strength of the event itself, not when a TTL lapses.
   - The pending-order-review flag is **not**: nothing core publishes carries a restaurant's new status. Deleting the branch projection is enough for correctness — the next placement re-reads from core and sees a non-active restaurant status — it just costs one upstream call instead of a Redis hit.
   - The RBAC permission projection expires on its TTL alone.
-  See `docs/implementation-plan.md` Phase 1 → "Deviations as built".
+  See `docs/status.md` → "Changes from the original plan".
 - Delivery semantics: **at-least-once**. Manual ack after the handler commits. Duplicates are expected.
 - Dedupe via Redis SETNX on `core-events:dedupe:<eventId>` (24h TTL): set-if-absent before dispatching the handler; if not fresh, ack and skip. Safe to expire because every handler is idempotent — a patch applies the same committed values twice, a delete deletes nothing the second time.
 - Authentication: AMQP credentials (per-service vhost user/pass from env). No HMAC on the wire — the broker is trusted.
@@ -524,18 +524,19 @@ Follow this exact order — never skip ahead:
 9. Mount in `src/routes.ts`.
 10. Smoke test the endpoint manually before moving on.
 
-Implement one module end-to-end before starting the next. Order: **orders → payments → delivery+agents (one phase) → restaurant-finance → archival worker**. Delivery and agents ship together: a delivery is a phase of an order (there is no `deliveries` table — `docs/database-design.md` §3.7), and dispatch is meaningless without presence. See `docs/implementation-plan.md`.
+Implement one module end-to-end before starting the next. Order: **orders → payments → delivery+agents (one phase) → restaurant-finance → archival worker**. Delivery and agents ship together: a delivery is a phase of an order (there is no `deliveries` table — `docs/database-design.md`), and dispatch is meaningless without presence. See `docs/status.md`.
 
 ---
 
 ## 12. Reference docs (in `docs/`)
 
-- `docs/database-design.md` — full schema, FK map, indexes, sharding plan.
-- `docs/system-design.md` — region sharding, redis layers, sync/async flows, kashier, websocket, archival.
-- `docs/folder-structure.md` — annotated tree, layer rules.
-- `docs/api-contracts.md` — endpoint-by-endpoint request/response DTOs and error codes.
-- `docs/business-logic/` — one file per module describing flows, invariants, RBAC, status machines.
-- `docs/implementation-plan.md` — step-by-step build order with acceptance checks.
+- `docs/README.md` — index.
+- `docs/system-design.md` — processes, sharding, Redis, RabbitMQ, core client, WebSocket.
+- `docs/database-design.md` — tables, keys, indexes, partitioning.
+- `docs/folder-structure.md` — tree and layer rules.
+- `docs/api-contracts.md` — endpoints, auth, errors, WebSocket events.
+- `docs/business-logic/` — one file per module (orders, payments, deliveries, agents, restaurant-finance, archival, rbac).
+- `docs/status.md` — what each phase delivered, how it was verified, known limits.
 
 ---
 

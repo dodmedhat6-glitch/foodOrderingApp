@@ -4,7 +4,7 @@
  * This is the whole catalog — core emits one coarse `invalidated` event per
  * entity type (its lib/events/events.ts), not the granular
  * `product.stock.changed` / `branch.deactivated` / `rbac.permissions_changed`
- * set that earlier drafts of CLAUDE.md s8 and docs/implementation-plan.md
+ * set that earlier drafts of CLAUDE.md s8 and docs/status.md
  * describe. A binding like `product.#` matches none of these, so a service
  * configured against that older catalog consumes nothing at all; the queue
  * binds `core.#`.

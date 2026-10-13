@@ -78,16 +78,21 @@ export async function findArchivableOrders(
     return rows.map((r: any) => ({id: Number(r.id), createdAt: r.created_at}));
 }
 
-/** The order headers themselves, addressed by `(id, created_at)` to prune partitions. */
+/**
+ * The order headers themselves. Matched by id plus `created_at < boundary`,
+ * not by the `(id, created_at)` tuple: the bound alone prunes to prior-year
+ * partitions, and equality on a timestamp round-tripped through a JS Date
+ * (millisecond precision) would silently miss any row whose `created_at` has
+ * microseconds — leaving a batch that can never be deleted.
+ */
 export async function selectOrders(
-    refs: ArchivableOrderRef[],
+    orderIds: number[],
+    boundary: Date,
     columns: TableColumns,
     conn: Knex,
 ): Promise<Record<string, unknown>[]> {
-    if (refs.length === 0) return [];
-    return conn("orders")
-        .select(columns.names)
-        .whereIn(["id", "created_at"], refs.map((r) => [r.id, r.createdAt]));
+    if (orderIds.length === 0) return [];
+    return conn("orders").select(columns.names).whereIn("id", orderIds).where("created_at", "<", boundary);
 }
 
 /** Every row of an order-child table belonging to these orders. `id` order keeps self-FKs valid. */
@@ -121,7 +126,13 @@ export async function selectOrderlessTransactions(
         .limit(limit);
 }
 
-/** Webhook audit rows received before `boundary`. They name no order, so they go by time. */
+/**
+ * Webhook audit rows received before `boundary`. They name no order, so they
+ * go by time. Only *finished* rows move — processed, or stamped with a
+ * process_error. One that never settled is exactly what the operator sweep
+ * (idx_payment_webhook_events_received_at, `processed_at IS NULL`) looks for,
+ * and it must stay where that sweep can see it.
+ */
 export async function selectWebhookEvents(
     boundary: Date,
     afterId: number,
@@ -132,6 +143,7 @@ export async function selectWebhookEvents(
     return conn("payment_webhook_events")
         .select(columns.names)
         .where("received_at", "<", boundary)
+        .where((q) => q.whereNotNull("processed_at").orWhereNotNull("process_error"))
         .where("id", ">", afterId)
         .orderBy("id", "asc")
         .limit(limit);
@@ -143,7 +155,7 @@ export async function selectWebhookEvents(
  * `ON CONFLICT DO NOTHING` with no target is what makes a re-run after a crash
  * safe: the archive commits before the hot delete, so a crash in between
  * leaves rows in both places, and the next run re-inserts them as no-ops
- * (docs/implementation-plan.md Phase 5). Ids are copied verbatim — they were
+ * (docs/status.md Phase 5). Ids are copied verbatim — they were
  * minted by the hot shard's sequence, which the archive never advances.
  */
 export async function insertRows(
@@ -182,11 +194,10 @@ export async function deleteByOrderIds(table: ArchivedTable, orderIds: number[],
     return rows.map((r: any) => Number(r.id));
 }
 
-export async function deleteOrders(refs: ArchivableOrderRef[], conn: Knex): Promise<number> {
-    if (refs.length === 0) return 0;
-    return conn("orders")
-        .whereIn(["id", "created_at"], refs.map((r) => [r.id, r.createdAt]))
-        .del();
+/** Same predicate as `selectOrders`, for the same reason. */
+export async function deleteOrders(orderIds: number[], boundary: Date, conn: Knex): Promise<number> {
+    if (orderIds.length === 0) return 0;
+    return conn("orders").whereIn("id", orderIds).where("created_at", "<", boundary).del();
 }
 
 export async function deleteByIds(table: ArchivedTable, ids: number[], conn: Knex): Promise<number> {

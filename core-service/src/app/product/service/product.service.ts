@@ -105,6 +105,10 @@ export class ProductService {
                     stock: data.stock,
                     isAvailable: data.isAvailable,
                 }, trx);
+                // No details row: the product is not sold at this branch (or
+                // the branch belongs to another restaurant). Roll back the
+                // product-level change too rather than half-apply the request.
+                if (!branchDetails) throw ProductNotFoundError;
 
                 // order-service caches product price/stock/isAvailable
                 // (cache:core:product:{id}) and must invalidate on this exact

@@ -6,6 +6,7 @@ import {PermissionsCashService} from "../../app/rbac/service/permissions-cash.se
 import {container} from "../di/containers";
 import {tokens} from "../di/tokens";
 import {sendError} from "../http/response";
+import {findBranchById} from "../../app/branch/repository/branch.repository";
 
 const permissionCashService = container.resolve<PermissionsCashService>(tokens.PermissionCashService);
 
@@ -94,6 +95,19 @@ export function requireBranchAccess(paramName: string = 'branchId') {
         }
 
         if (req.user.role !== SystemRole.RESTAURANT_USER) {
+            return sendError(res, "Permission denied", 403);
+        }
+
+        // An owner is scoped to the whole restaurant and is usually assigned
+        // to no branch at all (branchIds is [] from registration), so the
+        // member-branch list cannot answer for them. These routes carry no
+        // restaurantId to check membership against, so the branch's own
+        // restaurant is the answer.
+        if (req.user.restaurantRole === "owner") {
+            const branch = await findBranchById(branchId);
+            if (branch && Number(branch.restaurantId) === Number(req.user.restaurantId)) {
+                return next();
+            }
             return sendError(res, "Permission denied", 403);
         }
 

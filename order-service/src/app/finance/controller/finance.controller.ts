@@ -123,9 +123,10 @@ function daysAgo(days: number): Date {
     return new Date(Date.now() - days * 24 * 60 * 60 * 1000);
 }
 
+/** Local time, like `created_at` itself (see lib/knex/archive-boundary.ts). */
 function startOfMonth(): Date {
     const now = new Date();
-    return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
+    return new Date(now.getFullYear(), now.getMonth(), 1);
 }
 
 /**

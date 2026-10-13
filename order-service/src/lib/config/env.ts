@@ -120,7 +120,7 @@ const baseSchema = z.object({
     AGENT_EARNING_BASE_MINOR: z.string().default("1500"),
     AGENT_EARNING_PER_KM_MINOR: z.string().default("300"),
 
-    // ---- archival (docs/implementation-plan.md Phase 5) ----
+    // ---- archival (docs/status.md Phase 5) ----
     // How often the worker wakes to check whether it is inside the nightly
     // window. Outside the window a tick returns without touching a shard.
     ARCHIVAL_INTERVAL_SEC: z.string().default("3600"),
