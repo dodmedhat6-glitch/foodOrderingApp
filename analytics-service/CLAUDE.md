@@ -24,7 +24,7 @@ pkg/messaging.py       # aio-pika client; app-agnostic
 lib/                   # app-aware glue, one file per concern
   config.py logger.py errors.py http.py auth.py core_client.py events.py
 app/analytics/         # the module
-  types.py errors.py dto.py repository.py service.py controller.py
+  types.py errors.py dto.py repository.py service.py routes.py controller.py
 play/                  # gitignored dev aids
 ```
 
@@ -43,9 +43,10 @@ Annotated: `docs/folder-structure.md`.
 | `dto.py` | request query/body models, response DTOs (`from_entity`), inbound event payload models |
 | `repository.py` | **the only pymongo code**: collection names, `ensure_indexes`, one repo class per collection |
 | `service.py` | the service class: business rules, raises `AppError`, returns DTOs (like order-service services) |
-| `controller.py` | `build_router(service, auth)` and `build_handlers(service)` — thin: validated input → one service call |
+| `routes.py` | `build_router(service, auth)` — thin: validated input → one service call |
+| `controller.py` | `build_handlers(service)` — thin: validated event payload → one service call |
 
-No dataclass/`BaseModel` declared in `service.py`, `controller.py` or `repository.py`.
+No dataclass/`BaseModel` declared in `service.py`, `routes.py`, `controller.py` or `repository.py`.
 
 Naming: `snake_case` files/functions, `PascalCase` classes, `ERR_`/`PERM_` constants. Wire and log keys are camelCase (pydantic aliases translate); Mongo fields snake_case; indexes `uq_/idx_/ttl_<collection>_<fields>`.
 

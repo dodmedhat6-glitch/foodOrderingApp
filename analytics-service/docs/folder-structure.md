@@ -26,7 +26,8 @@ analytics-service/
 │       ├── dto.py          # RestaurantDaysQuery, RestaurantDayResponse, OrderPlacedPayload
 │       ├── repository.py   # ensure_indexes, AggRestaurantDayRepo, EventIdsRepo — only pymongo code
 │       ├── service.py      # AnalyticsService.on_order_placed / get_restaurant_days
-│       └── controller.py   # build_router (HTTP) + build_handlers (events)
+│       ├── routes.py       # build_router (HTTP)
+│       └── controller.py   # build_handlers (events)
 │
 ├── play/                   # GITIGNORED: mock_core, mint_jwt, publish_test, check_mongo
 ├── docs/

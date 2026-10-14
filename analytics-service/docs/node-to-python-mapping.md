@@ -175,7 +175,7 @@ class AnalyticsService:
 ```
 The constructor signature *is* the dependency declaration. Returns DTOs, like `placeOrder` does.
 
-### 2.10 Controllers + routes — `*.controller.ts` + `routes.ts` → `controller.py`
+### 2.10 Controllers + routes — `*.controller.ts` + `routes.ts` → `routes.py`
 
 ```ts
 const controller = container.resolve<OrderController>(TOKENS.OrderController);
