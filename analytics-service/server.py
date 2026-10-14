@@ -21,8 +21,9 @@ from pydantic import ValidationError
 from pymongo import AsyncMongoClient
 from uvicorn.server import HANDLED_SIGNALS
 
-from app.analytics.controller import build_handlers, build_router
+from app.analytics.controller import build_handlers
 from app.analytics.repository import AggRestaurantDayRepo, EventIdsRepo, ensure_indexes
+from app.analytics.routes import build_router
 from app.analytics.service import AnalyticsService
 from lib.auth import Auth, PermissionsCache
 from lib.config import Env

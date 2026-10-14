@@ -56,9 +56,9 @@ Mirror core's outbox into `order-service`.
 - [x] `--routing-key payment.completed` → `no handler for event type, acking`.
 - [x] RabbitMQ down at boot → `rabbit not reachable at boot — retrying in background`, HTTP still serves.
 
-## Phase 5 — Read path: auth, RBAC, DTOs, controller, routes
+## Phase 5 — Read path: auth, RBAC, DTOs, routes
 
-`lib/{auth,core_client,errors,http}.py`, `app/analytics/dto.py`, `controller.py` `build_router`, `service.py` `get_restaurant_days`.
+`lib/{auth,core_client,errors,http}.py`, `app/analytics/dto.py`, `routes.py` `build_router`, `service.py` `get_restaurant_days`.
 
 **Acceptance** (with `play.mock_core` running)
 - [x] No token → `401 UNAUTHENTICATED`; garbage cookie → 401; expired → 401.
