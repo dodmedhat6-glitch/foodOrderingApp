@@ -6,6 +6,7 @@ import {PermissionsCashService} from "../../app/rbac/service/permissions-cash.se
 import {container} from "../di/containers";
 import {tokens} from "../di/tokens";
 import {sendError} from "../http/response";
+import {findBranchById} from "../../app/branch/repository/branch.repository";
 
 const permissionCashService = container.resolve<PermissionsCashService>(tokens.PermissionCashService);
 
@@ -78,9 +79,13 @@ export function requireRestaurantMember(paramName: string= 'restaurantId') {
     }
 }
 
+// branch id is read from the path, falling back to the query string for endpoints
+// that carry it there (PATCH /products/:id?branchId=)
+// owners have no branch list (branchIds: []) - they pass for any branch of their own restaurant
 export function requireBranchAccess(paramName: string = 'branchId') {
     return async(req: Request, res: Response, next: NextFunction) => {
-        const branchId = Number(req.params[paramName]);
+        const rawBranchId = req.params[paramName] ?? req.query[paramName];
+        const branchId = typeof rawBranchId === 'string' ? Number(rawBranchId) : NaN;
         if (!Number.isFinite(branchId) || branchId <= 0) {
             return sendError(res, "Invalid branch id", 400);
         }
@@ -95,6 +100,18 @@ export function requireBranchAccess(paramName: string = 'branchId') {
 
         if (req.user.role !== SystemRole.RESTAURANT_USER) {
             return sendError(res, "Permission denied", 403);
+        }
+
+        if (req.user.restaurantRole === 'owner') {
+            try {
+                const branch = await findBranchById(branchId);
+                if (!branch || Number(branch.restaurantId) !== Number(req.user.restaurantId)) {
+                    return sendError(res, "Permission denied", 403);
+                }
+                return next();
+            } catch (error) {
+                return next(error);
+            }
         }
 
         const allowedBranchIds = Array.isArray(req.user.branchIds) ? req.user.branchIds : [];
