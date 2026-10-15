@@ -1,12 +1,9 @@
 import type { Knex } from "knex";
 
-// customer_addresses: `text` was never written by the repository (inserts failed on NOT NULL),
-// and the type CHECK did not match AddressType (office/home/public_place).
+// customer_addresses: the type CHECK did not match AddressType (office/home/public_place).
 // restaurants: the status CHECK allowed 'disable' while RestaurantStatus.DISABLED is 'disabled'.
 export async function up(knex: Knex): Promise<void> {
     await knex.raw(`
-        ALTER TABLE customer_addresses ALTER COLUMN text DROP NOT NULL;
-
         ALTER TABLE customer_addresses DROP CONSTRAINT IF EXISTS customer_addresses_type_check;
         UPDATE customer_addresses SET type = 'office' WHERE type = 'work';
         UPDATE customer_addresses SET type = 'public_place' WHERE type = 'other';
@@ -32,8 +29,5 @@ export async function down(knex: Knex): Promise<void> {
         UPDATE customer_addresses SET type = 'other' WHERE type = 'public_place';
         ALTER TABLE customer_addresses
             ADD CONSTRAINT customer_addresses_type_check CHECK (type IN ('home', 'work', 'other'));
-
-        UPDATE customer_addresses SET text = '' WHERE text IS NULL;
-        ALTER TABLE customer_addresses ALTER COLUMN text SET NOT NULL;
     `);
 }

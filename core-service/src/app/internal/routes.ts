@@ -53,3 +53,14 @@ internalRouter.post(
     rbac({ resource: "core:product", action: "reserve" }),
     internalController.reserveStock
 );
+
+// The compensation for reserve-stock. Same permission on purpose: handing back
+// units you were allowed to hold is part of holding them, and a separate
+// `release` action would be a grant nobody could sensibly have without the
+// other.
+internalRouter.post(
+    "/branches/:branchId/release-stock",
+    apiKeyAuth,
+    rbac({ resource: "core:product", action: "reserve" }),
+    internalController.releaseStock
+);

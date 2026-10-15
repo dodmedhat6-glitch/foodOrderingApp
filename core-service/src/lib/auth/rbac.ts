@@ -32,7 +32,7 @@ export function rbac(options: RBACOptions) {
             const {resource, action, allowSystemAdmin = true} = options;
 
             // if he is a system admin -> bypass
-            if (!allowSystemAdmin && req.user.role == SystemRole.SYSTEM_ADMIN) {
+            if (allowSystemAdmin && req.user.role == SystemRole.SYSTEM_ADMIN) {
                 return next();
             }
             // if restaurant user
@@ -79,13 +79,9 @@ export function requireRestaurantMember(paramName: string= 'restaurantId') {
     }
 }
 
-// branch id is read from the path, falling back to the query string for endpoints
-// that carry it there (PATCH /products/:id?branchId=)
-// owners have no branch list (branchIds: []) - they pass for any branch of their own restaurant
 export function requireBranchAccess(paramName: string = 'branchId') {
     return async(req: Request, res: Response, next: NextFunction) => {
-        const rawBranchId = req.params[paramName] ?? req.query[paramName];
-        const branchId = typeof rawBranchId === 'string' ? Number(rawBranchId) : NaN;
+        const branchId = Number(req.params[paramName]);
         if (!Number.isFinite(branchId) || branchId <= 0) {
             return sendError(res, "Invalid branch id", 400);
         }
@@ -102,16 +98,17 @@ export function requireBranchAccess(paramName: string = 'branchId') {
             return sendError(res, "Permission denied", 403);
         }
 
-        if (req.user.restaurantRole === 'owner') {
-            try {
-                const branch = await findBranchById(branchId);
-                if (!branch || Number(branch.restaurantId) !== Number(req.user.restaurantId)) {
-                    return sendError(res, "Permission denied", 403);
-                }
+        // An owner is scoped to the whole restaurant and is usually assigned
+        // to no branch at all (branchIds is [] from registration), so the
+        // member-branch list cannot answer for them. These routes carry no
+        // restaurantId to check membership against, so the branch's own
+        // restaurant is the answer.
+        if (req.user.restaurantRole === "owner") {
+            const branch = await findBranchById(branchId);
+            if (branch && Number(branch.restaurantId) === Number(req.user.restaurantId)) {
                 return next();
-            } catch (error) {
-                return next(error);
             }
+            return sendError(res, "Permission denied", 403);
         }
 
         const allowedBranchIds = Array.isArray(req.user.branchIds) ? req.user.branchIds : [];

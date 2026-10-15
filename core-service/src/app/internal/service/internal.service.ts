@@ -5,8 +5,10 @@ import { findAddressById } from "../../addresses/repository/customer-address.rep
 import { findUserById } from "../../user/repository/user.repo";
 import { findProductsByIdsAndBranch } from "../../product/repository/product.repository";
 import {
+    MissingLine,
     ReserveStockLine,
     ReservedLine,
+    releaseBranchStock,
     reserveBranchStock,
 } from "../../product/repository/product-branch-details.repository";
 import { findRestaurantById } from "../../restaurant/repository/restaurant.repo";
@@ -64,6 +66,11 @@ export interface ProductLookupResponse {
 
 export interface ReserveStockResponse {
     reserved: ReservedLine[];
+}
+
+export interface ReleaseStockResponse {
+    released: ReservedLine[];
+    missing: MissingLine[];
 }
 
 /**
@@ -179,6 +186,43 @@ export class InternalService {
 
             await trx.commit();
             return { reserved };
+        } catch (error) {
+            if (!trx.isCompleted()) {
+                await trx.rollback();
+            }
+            throw error;
+        }
+    }
+
+    /**
+     * The inverse of `reserveStock`: returns units order-service no longer
+     * needs - a placement that failed after reserving, an unpaid checkout that
+     * expired, an order rejected or cancelled before pickup.
+     *
+     * No branch lookup first, unlike the reserve: a branch that has gone away
+     * simply has no rows, so every line comes back in `missing` rather than as
+     * a 404 the compensating caller can do nothing with.
+     *
+     * Same outbox rule as the reserve - one invalidation per line whose stock
+     * actually moved, in the same transaction as the move.
+     */
+    releaseStock = async (branchId: number, lines: ReserveStockLine[]): Promise<ReleaseStockResponse> => {
+        const trx = await db.transaction();
+        try {
+            const { released, missing } = await releaseBranchStock(branchId, lines, trx);
+
+            for (const line of released) {
+                await enqueueOutboxEvent({
+                    channel: invalidationChannel("product"),
+                    eventType: invalidationEventType("product"),
+                    entityType: "product",
+                    entityId: line.productId,
+                    payload: buildInvalidationPayload(line.productId),
+                }, trx);
+            }
+
+            await trx.commit();
+            return { released, missing };
         } catch (error) {
             if (!trx.isCompleted()) {
                 await trx.rollback();

@@ -22,9 +22,11 @@ router.use('/' , branchRouter)
 
 router.use('/' , rbacRouter)
 
+// Catalogue: /restaurants/:restaurantId/categories|products, /branches/:branchId/products, /products/:id
 router.use('/' , productRouter)
 
-router.use('/customer/addresses' , customerAddressRouter)
+// The caller's own delivery addresses (customer, JWT-scoped)
+router.use('/addresses' , customerAddressRouter)
 
 // service-to-service surface for order-service - api-key authenticated, see app/internal/routes.ts
 router.use('/internal' , internalRouter)

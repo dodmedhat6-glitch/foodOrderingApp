@@ -17,7 +17,7 @@ import type { Knex } from "knex";
  * `payments:refund` and `finance:payout_create` are seeded but granted to no
  * role: they are admin-bypassed today, and seeding them now means turning
  * them on later is a role mapping rather than a migration.
- * See docs/implementation-plan.md Phase 0 s0.5 on the order-service side.
+ * See docs/status.md Phase 0 s0.5 on the order-service side.
  */
 const PERMISSIONS: Array<[resource: string, action: string]> = [
     ["orders", "read"],

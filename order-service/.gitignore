@@ -1,0 +1,16 @@
+node_modules/
+dist/
+.env
+.env.*.bak
+*.log
+.DS_Store
+.idea/
+.vscode/
+
+# local experimentation scripts — not tracked
+play/
+
+# Claude Code worktrees. Unanchored on purpose: `.claude/worktrees/` would
+# only match at the repo root, which is how one got committed as a stray
+# gitlink under `src/` (commit 00425b2).
+**/.claude/worktrees/
