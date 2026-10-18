@@ -21,3 +21,6 @@ coverage/
 
 #test
 .env.test
+
+# Nested standalone repo - has its own git history
+MCPServer/
