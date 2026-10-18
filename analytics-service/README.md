@@ -2,6 +2,18 @@
 
 Per-day rollups of QuickBite order activity. Consumes `order.events` from RabbitMQ, upserts aggregates into MongoDB, serves them read-only over HTTP. Python + FastAPI + pymongo + aio-pika, built to mirror the Node services next to it.
 
+[← Back to the platform overview](../README.md)
+
+## What it does
+
+| Piece | Details |
+| --- | --- |
+| Event consumer | aio-pika consumer on `order.events` (bindings `order.#`, `payment.#`), manual acks, dedupe by `eventId`, malformed messages to a dead-letter queue |
+| Storage | Idempotent upserts of per-day, per-restaurant aggregates (orders count, revenue, average order) into MongoDB, with the indexes declared in `app/analytics/repository.py` |
+| API | `GET /api/v1/analytics/restaurants/{id}/days?from=&to=` — read-only, JWT cookie auth shared with core, `analytics:read` permission checked against core with a TTL cache |
+| Ops | `/health` reports Mongo and RabbitMQ status; structured JSON logs; graceful shutdown |
+| Quality | `mypy --strict`, `ruff`, pydantic-validated settings |
+
 Rules: [`CLAUDE.md`](CLAUDE.md). Design: [`docs/system-design.md`](docs/system-design.md). Coming from the Node services? Start with [`docs/node-to-python-mapping.md`](docs/node-to-python-mapping.md).
 
 ## Prerequisites

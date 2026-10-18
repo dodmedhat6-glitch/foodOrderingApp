@@ -1,428 +1,170 @@
-# Food Ordering Platform
+# QuickBite — Food Ordering Platform (Backend)
 
-A backend for a multi-restaurant food ordering platform. Restaurants register,
-open branches, manage a product catalogue whose price and stock vary per branch,
-and give their staff scoped permissions. Customers browse restaurants, find
-branches that deliver to their location, and manage delivery addresses.
+A backend for a **multi-restaurant food ordering platform**, built as three
+independent services that talk over HTTP and RabbitMQ.
 
-The backend is written in Node.js and TypeScript on Express 5, with PostgreSQL
-(plus PostGIS) as the primary store and Redis for caching and idempotency. The
-repository is a monorepo: each service is meant to be a self-contained
-application with its own dependencies, migrations and configuration.
+Restaurants sign up, open branches, manage a catalogue whose price and stock
+vary per branch, and give their staff scoped permissions. Customers find
+branches that deliver to them, place orders and pay online or cash on delivery.
+Delivery agents are dispatched by proximity, restaurants see their balance and
+payouts, and owners get daily analytics.
 
-**Current status:** two services are implemented. `core-service` covers
-authentication, users, restaurants, branches, products, addresses and RBAC.
-`order-service` (see [`order-service/`](order-service/) and its `docs/`) covers
-orders, Kashier payments and refunds, delivery dispatch and agent presence,
-restaurant finance (balance, payouts, ledger summary) and nightly archival of
-prior-year data to a cold cluster — every phase of its implementation plan is
-built. Payments live inside `order-service`; `analytics-service` is still
-planned.
-
-## Engineering Highlights
-
-- **Layered architecture:** every module follows Routes → Controllers →
-  Services → Repositories, and each layer has one job.
-- **Dependency injection with `tsyringe`:** controllers, services and
-  infrastructure adapters are bound to symbol tokens and resolved from a single
-  container.
-- **JWT authentication** with separate access and refresh tokens, each signed
-  with its own secret and delivered in `httpOnly` cookies.
-- **RBAC:** system roles, plus restaurant-scoped roles whose permissions are
-  stored in the database as `resource:action` pairs and checked by middleware.
-- **Branch-level authorization:** staff can be limited to specific branches,
-  and the assignments are carried in the token.
-- **Geospatial search:** a PostGIS `geography` column with a GIST index finds
-  active branches whose delivery radius covers a given point (`ST_DWithin`).
-- **Multi-restaurant / multi-branch data model:** product price, stock and
-  availability are stored per branch, and a PostgreSQL trigger keeps them in
-  step with new products.
-- **Redis:** a response-cache middleware and an idempotency-key middleware.
-- **Transactional writes:** a restaurant sign-up creates the user, the
-  restaurant and the owner membership in one Knex transaction.
-- **Cursor-based pagination and whitelisted query filters** (`eq`, `gt`, `lt`,
-  `gte`, `lte`, `in`, `like`).
-- **Swappable infrastructure:** cache and email sit behind interfaces
-  (`ICacheProvider`, `IEmailProvider`), with Redis and Mailjet adapters.
-- **Observability and safety:** per-request correlation IDs, structured JSON
-  logging, centralized typed error handling, environment validated with zod at
-  startup, `helmet`, configurable CORS and graceful shutdown.
-
-## What Is Implemented
-
-| Area | Status | What is implemented |
+| Service | Responsibility | Stack |
 | --- | --- | --- |
-| Authentication | Implemented | Register (customer or restaurant owner), login, refresh, staff invite acceptance. bcrypt password hashing, JWT access and refresh tokens in `httpOnly` cookies. |
-| Password reset | Implemented | 6-digit OTP generated with `crypto.randomInt`, stored as a SHA-256 hash with a 10-minute expiry, sent through Mailjet. The request endpoint requires an `Idempotency-Key` header and does not reveal whether an account exists. |
-| Users | Implemented | `GET /api/user/me`, `PATCH /api/user/update-user`. |
-| Restaurants | Implemented | Created as `pending` during owner sign-up. Public listing with cursor pagination and filters, owner updates, status changes by a system admin. |
-| Branches | Implemented | Create/update (owner), status and commission changes (system admin), list by restaurant, PostGIS nearby search cached in Redis. |
-| RBAC | Implemented ⚠️ | Roles, permissions (seeded by migration), restaurant members, member-branch assignments. Member create/list/update/delete, branch reassignment, role-permission lookup. Invitation emails are not sent yet. |
-| Permission cache | Implemented | In-process cache (`Map`, 1-hour TTL) of role → permissions, so the database is queried at most once an hour per role and process. |
-| Response cache / idempotency | Implemented | Redis-backed `withCache()` and `idempotency()` middleware. |
-| Products | Implemented | Categories, products, per-branch price/stock/availability, the auto-populating trigger. Public catalogue reads; owner create/update; `PATCH /branches/:branchId/products/:id` for branch details. |
-| Addresses | Implemented | `GET/POST /api/addresses`, `PATCH/DELETE /api/addresses/:id`, single-default handling. |
-| Health checks | Implemented | `GET /api/health` runs a `select 1` against PostgreSQL. |
-| Event outbox / API keys | Implemented | Transactional outbox drained to RabbitMQ by `core-service`'s worker; API-key auth for `order-service`'s calls to `/api/internal/*`. |
-| Automated tests | Not started | No test suite yet. |
-| `order-service` | Implemented | Orders, Kashier v3 payments and refunds, dispatch and presence, restaurant finance, cold archival. Region-sharded Postgres, Redis, RabbitMQ, socket.io. |
-| `analytics-service` | Planned | Reporting and business metrics. |
+| [`core-service`](core-service/) | Identity, restaurants, branches, products, addresses, RBAC | TypeScript · Express 5 · PostgreSQL + PostGIS · Redis |
+| [`order-service`](order-service/) | Orders, payments, delivery dispatch, agents, restaurant finance, archival | TypeScript · Express 5 · sharded PostgreSQL · Redis · socket.io |
+| [`analytics-service`](analytics-service/) | Per-day order and revenue rollups for restaurant owners | Python · FastAPI · MongoDB |
+
+All three are implemented. Each one has its own dependencies, migrations,
+configuration and README.
 
 ## Architecture
 
 ```mermaid
-flowchart TB
+flowchart LR
     Client["Client<br/>(web / mobile)"]
 
-    subgraph Implemented["Implemented"]
-        Core["core-service<br/>Express 5 · TypeScript"]
-        PG[("PostgreSQL + PostGIS")]
-        Redis[("Redis<br/>response cache · idempotency")]
-        Mailjet["Mailjet<br/>(transactional email)"]
+    subgraph Core["core-service"]
+        CoreAPI["API"]
+        CoreWorker["Outbox worker"]
     end
-
-    subgraph Planned["Planned"]
-        Order["order-service"]
-        Payment["payment-service"]
-        Analytics["analytics-service"]
+    subgraph Order["order-service"]
+        OrderAPI["API + WebSocket"]
+        OrderWorker["Worker<br/>(jobs + outbox)"]
     end
+    Analytics["analytics-service<br/>FastAPI"]
 
-    Client -->|"HTTP /api"| Core
-    Core -->|Knex| PG
-    Core -->|ioredis| Redis
-    Core -->|password-reset OTP| Mailjet
+    CorePG[("PostgreSQL<br/>+ PostGIS")]
+    OrderPG[("PostgreSQL<br/>hot + archive shard<br/>per country")]
+    Mongo[("MongoDB")]
+    Redis[("Redis")]
+    MQ[("RabbitMQ")]
+    Kashier["Kashier<br/>payments"]
 
-    Client -.->|planned| Order
-    Order -.->|planned| Payment
-    Core -.->|"planned: event_outbox"| Analytics
+    Client --> CoreAPI
+    Client --> OrderAPI
+    Client --> Analytics
 
-    classDef planned stroke-dasharray: 5 5,fill:#f6f6f6,color:#666;
-    class Order,Payment,Analytics planned;
+    CoreAPI --> CorePG
+    CoreWorker -->|"core.events"| MQ
+    OrderAPI -->|"internal HTTP<br/>x-api-key"| CoreAPI
+    MQ -->|"cache invalidation"| OrderAPI
+    OrderAPI --> OrderPG
+    OrderWorker --> OrderPG
+    OrderWorker -->|"order.events"| MQ
+    MQ -->|"order.placed"| Analytics
+    Analytics --> Mongo
+    Analytics -->|"permission lookup"| CoreAPI
+    OrderAPI <-->|"checkout · webhooks"| Kashier
+    CoreAPI --> Redis
+    OrderAPI --> Redis
 ```
 
-Solid boxes and arrows exist in the code today. Dashed ones show the intended
-direction. The `event_outbox` table is already in the schema, but nothing
-publishes from it yet.
+- **Synchronous** calls (HTTP) are used only when an answer is needed right
+  now: order-service reads branches, prices and stock from core, and reserves
+  stock before writing an order.
+- **Asynchronous** events (RabbitMQ) carry everything else. Each publisher
+  writes events to a **transactional outbox** in the same database transaction
+  as the change, and a worker drains it to the broker. Consumers de-duplicate
+  by event id and route poison messages to a dead-letter queue.
+- All services share one JWT contract, so a token issued by core is accepted
+  everywhere.
 
-## Core Service Architecture
+## Engineering Highlights
 
-Each module under `core-service/src/app/<module>/` is split into layers, and
-each layer calls only the one directly below it:
+**Data & scale**
+- Order data **sharded by country** (a hot and an archive PostgreSQL database
+  per region), with `orders` **partitioned by month** and a nightly job that
+  archives prior years while reads still merge both.
+- **PostGIS** geospatial search (`ST_DWithin` + GIST index) for "which branches
+  deliver to this address", and a **Redis GEO** index for nearby delivery
+  agents.
+- Indexes added only for queries that exist, checked with `EXPLAIN`; cursor
+  pagination everywhere; money stored as integer minor units.
 
-```
-Route        routes.ts     HTTP method + path, middleware chain (authenticate, rbac, cache)
-  ↓
-Controller   controller/   validates the body into a DTO, calls the service, shapes the response
-  ↓
-Service      service/      business rules, ownership checks, transactions
-  ↓
-Repository   repository/   Knex queries, maps snake_case rows to entity classes
-  ↓
-PostgreSQL
-```
+**Reliability**
+- **Idempotency keys** on every order and payment write, backed by Redis and
+  PostgreSQL so a retry never reserves stock or charges twice.
+- **Saga-style compensation**: stock is reserved in core and released if the
+  order write or payment fails.
+- **Transactional outbox** on both publishers (`FOR UPDATE SKIP LOCKED`,
+  publisher confirms) and at-least-once consumers with dedupe and DLQs.
+- Compare-and-set status transitions, so concurrent actions on one order get
+  exactly one winner.
 
-Alongside the layers, `dto/` holds `class-validator` input classes, `entity/`
-holds classes that represent table rows, and `errors.ts` / `enums.ts` hold
-module-specific errors and enums.
+**Security**
+- JWT access + refresh tokens in `httpOnly` cookies, bcrypt hashing, hashed
+  password-reset OTPs with expiry.
+- **Two-level RBAC**: system roles plus restaurant roles with `resource:action`
+  permissions and branch-level scoping.
+- Hashed API keys for service-to-service calls; signature-verified payment
+  webhooks.
 
-**Dependency injection.** Tokens are `Symbol.for(...)` values in
-`src/lib/di/tokens.ts`. `src/lib/di/containers.ts` registers every controller
-and service as a singleton and binds the infrastructure adapters as instances:
-`CacheProvider` (Redis) and `EmailProvider` (Mailjet). Classes are marked
-`@injectable()` and receive dependencies through `@inject(token)`. For example,
-`AuthService` gets `UserService`, `RestaurantService`, `MemberService` and the
-`IEmailProvider` through its constructor. Route files resolve their controller
-from the container, and the middleware resolves the cache provider the same
-way, so changing an adapter only touches the container.
-
-## Core Modules
-
-| Module | Responsibility |
-| --- | --- |
-| `auth` | Registration (customer / restaurant owner), login, token refresh, password reset by OTP, staff invite acceptance, email template |
-| `user` | User accounts, system roles, profile read/update |
-| `restaurant` | Restaurant records, lifecycle status (`pending`, `active`, `suspended`, `disable`), paginated public listing |
-| `branch` | Branches with location, opening hours, currency, delivery radius and commission. Nearby search |
-| `product` | Categories, products, and per-branch price / stock / availability |
-| `addresses` | Customer delivery addresses with a single default address per user |
-| `rbac` | Roles, permissions, restaurant members, member-branch assignments, permission cache |
-| `health` | Database connectivity check |
-
-## Shared Infrastructure
-
-`src/lib/` holds application wiring:
-
-| Path | Purpose |
-| --- | --- |
-| `config/env.ts` | Loads `.env` and validates it with a zod schema. Exposes a typed `env` object. |
-| `di/` | `tsyringe` tokens and container bindings |
-| `knex/` | Knex config (shared by the app and the Knex CLI) and the database instance |
-| `auth/` | `authenticate`, `rbac()`, `requireRestaurantMember()`, `requireBranchAccess()`, cookie helpers |
-| `cache/` | Redis provider instance and the `withCache()` response-cache middleware |
-| `Idempotency/` | `idempotency()` middleware that stores responses under the `Idempotency-Key` header |
-| `error/` | `AppError` (status code + operational flag) and the central error handler |
-| `correlationId/` | Assigns a UUID to each request and returns it in `X-Correlation-ID` |
-| `logger/` | Structured JSON logger |
-| `http/` | Response envelope helpers, cursor pagination and query-filter parsing |
-| `validation/` | `validateBody()` built on `class-transformer` + `class-validator` (whitelisting) |
-| `email/` | Mailjet provider instance |
-
-`src/pkg/` holds infrastructure adapters behind interfaces, with no
-application dependencies:
-
-- `cache/`: `ICacheProvider` and a `RedisCacheProvider` (ioredis)
-- `email/`: `IEmailProvider` and a Mailjet provider
-- `utils/`: time-unit helpers
-
-## Key Backend Features
-
-### Authentication
-
-- Passwords are hashed with bcrypt.
-- Login and registration issue an access token and a refresh token, signed with
-  separate secrets and expiries (`ACCESS_EXPIRATION`, `REFRESH_EXPIRATION`).
-- Both tokens are set as `httpOnly` cookies (`secure` in production). The
-  refresh cookie is scoped to `/api/auth/refresh`, so the browser sends it only
-  to that endpoint.
-- The token payload carries the user's system role. Restaurant staff tokens also
-  carry their restaurant, restaurant role and assigned branches, so
-  authorization checks do not need a database lookup per request.
-- `POST /api/auth/refresh` verifies the refresh token and issues a new access
-  token. The refresh token itself is not rotated.
-- Password reset sends a 6-digit OTP by email. Only its SHA-256 hash is stored,
-  and it expires after 10 minutes.
-
-### RBAC
-
-Authorization has two levels.
-
-1. **System roles** on the user: `system_admin`, `restaurant_user`, `customer`,
-   `delivery_agent`.
-2. **Restaurant roles** for `restaurant_user` accounts. A user joins a
-   restaurant through `restaurant_members` with a role. `role_permissions` maps
-   roles to `(resource, action)` permissions such as `core:product:create`.
-   `member_branches` limits a member to specific branches.
-
-Routes compose three middleware:
-
-```ts
-branchRouter.patch('/branches/:branchId',
-    authenticate,                                      // verify access-token cookie
-    requireBranchAccess('branchId'),                   // branch is in the token's branchIds
-    rbac({resource: "core:branch", action: 'update'}), // role has the permission
-    branchController.update
-);
-```
-
-- `requireRestaurantMember` and `requireBranchAccess` let a `system_admin`
-  through and check every other user against the restaurant or branches in
-  their token.
-- `rbac()` looks up the permission set for the user's restaurant role through
-  `PermissionsCashService`. This is an in-process cache with a 1-hour TTL, so
-  each process queries the database at most once an hour per role.
-- On top of the middleware, services enforce ownership (for example, only the
-  restaurant owner or a system admin can update a branch). Status changes on
-  restaurants and branches are restricted to system admins.
-- Owners are created automatically when they sign up. Other staff are invited:
-  a user account and an `inactive` membership are created with branch
-  assignments and an OTP. `POST /api/auth/accept-invite` then sets the password
-  and activates the membership.
-
-### Multi-Branch Product Model
-
-A product belongs to a restaurant, but its commercial data belongs to a branch.
-`product_branch_details` holds `price`, `stock` and `is_available` per
-`(branch_id, product_id)`, with a unique constraint on the pair. The same burger
-can cost and stock differently in each branch, or be unavailable in one of them.
-
-The `trg_product_after_insert` trigger (`fn_insert_product_branch_details`)
-runs after each product insert. It creates a row for every existing branch of
-that restaurant, with price `0`, stock `0` and `is_available = false`. A new
-product therefore starts hidden everywhere until a branch prices and enables
-it. The trigger does not run when a branch is added, so branches created later
-get no rows for existing products.
-
-### Observability and Reliability
-
-- **Correlation IDs:** every request gets a UUID, returned in the
-  `X-Correlation-ID` response header and attached to error logs.
-- **Centralized errors:** modules throw `AppError` instances with an HTTP
-  status. The global handler logs every error and returns operational errors as
-  is. Anything unexpected becomes a generic `500`, so internal details do not
-  leak. All responses use the same `{ success, data, meta? }` envelope.
-- **Logging:** a structured JSON logger (level, message, timestamp, metadata)
-  writes to stdout.
-- **Health check:** `GET /api/health` runs a database round-trip.
-- **Environment validation:** the zod schema runs at import time. A missing
-  required variable stops the process at startup, not on the first request
-  that needs it.
-- **Graceful shutdown:** on `SIGINT`/`SIGTERM` the HTTP server stops accepting
-  connections, then the Knex pool is closed.
+**Code quality**
+- Layered modules (Routes → Controllers → Services → Repositories) with
+  dependency injection (`tsyringe` in Node, FastAPI dependencies in Python).
+- Infrastructure behind interfaces (cache, email, message broker, payment
+  provider), so adapters are swappable.
+- Strict TypeScript, `mypy --strict` and `ruff` on the Python service,
+  zod/pydantic-validated configuration, structured JSON logs with correlation
+  IDs, central typed error handling and graceful shutdown.
 
 ## Tech Stack
 
 | Area | Technology |
 | --- | --- |
-| Runtime | Node.js |
-| Language | TypeScript (strict mode) |
-| HTTP | Express 5 |
-| Database | PostgreSQL with PostGIS |
-| Database access | Knex (query builder + migrations), `pg` driver |
-| Cache | Redis via ioredis |
-| DI | tsyringe, reflect-metadata |
-| Validation | zod (environment), class-validator + class-transformer (request DTOs) |
-| Authentication | jsonwebtoken, bcrypt, cookie-parser |
-| Email | Mailjet (`node-mailjet`) |
-| Security | helmet, cors |
-| Development | tsx (watch mode), tsc |
+| Languages | TypeScript (Node.js 20+), Python 3.11+ |
+| Frameworks | Express 5, FastAPI |
+| Databases | PostgreSQL (PostGIS, partitioning, sharding), MongoDB |
+| Data access | Knex (query builder + migrations), pymongo |
+| Cache / coordination | Redis (cache, idempotency, GEO, locks, socket.io adapter) |
+| Messaging | RabbitMQ (topic exchanges, DLQs, publisher confirms) |
+| Real-time | socket.io |
+| Payments | Kashier v3 |
+| Auth | JWT, bcrypt, hashed API keys |
+| Validation | zod, class-validator, pydantic |
 
-## Getting Started
+## Repository Layout
 
-### Prerequisites
-
-- Node.js 20 or newer
-- PostgreSQL 14 or newer with the **PostGIS** extension available. The branches
-  migration runs `CREATE EXTENSION IF NOT EXISTS postgis`, so the database user
-  needs permission to create it.
-- Redis 6 or newer
-- A Mailjet account to actually send password-reset emails. Any non-empty
-  values pass validation if you only need the server to boot.
-
-### 1. Clone and install
-
-```bash
-git clone https://github.com/dodmedhat6-glitch/foodOrderingApp.git
-cd foodOrderingApp/core-service
-npm install
+```
+foodOrderingApp/
+├── core-service/        # Node/TS — identity, catalogue, RBAC, internal API, outbox
+├── order-service/       # Node/TS — orders, payments, delivery, finance, archival
+│   └── docs/            # system design, API contracts, DB design, business rules
+├── analytics-service/   # Python/FastAPI — daily rollups from order events
+│   └── docs/
+└── docs/                # cross-service development workflow
 ```
 
-### 2. Configure the environment
+## Running Locally
 
-```bash
-cp .env.example .env
-```
+You need **Node.js 20+, Python 3.11+, PostgreSQL 14+ with PostGIS, Redis,
+RabbitMQ and MongoDB**. Start the services in this order — each README has the
+full steps and environment variables:
 
-Edit `core-service/.env` and fill in the database password and name, the two
-JWT secrets and the Mailjet credentials. Every variable is documented in
-`.env.example` and validated at startup.
+1. **[core-service](core-service/README.md#getting-started)** — `npm run migrate`, `npm run dev`, `npm run worker:dev`
+2. **[order-service](order-service/README.md#getting-started)** — `npm run migrate:all`, `npm run dev`, `npm run dev:worker`
+3. **[analytics-service](analytics-service/README.md#setup)** — `uv sync`, `python server.py`
 
-### 3. Create an empty database and run migrations
+Shared settings that must match across services: the JWT `ACCESS_SECRET` /
+`REFRESH_SECRET`, and core's `ORDER_SERVICE_API_KEY` = order-service's
+`CORE_INTERNAL_API_KEY`.
 
-From `core-service/`:
+Docker Compose for the whole stack is in progress.
 
-```bash
-npm run knex -- migrate:latest
-```
+## Project Status
 
-On a **fresh** database this currently fails on the first migration. Use the
-workaround under [Known Issues](#known-issues). Other Knex commands work the
-same way (`npm run knex -- migrate:list`, `npm run knex -- migrate:rollback`).
-The same `npm run knex -- <cmd>` also works from the repository root.
-
-### 4. Start the development server
-
-```bash
-npm run dev
-```
-
-The API is served under `/api` on `PORT` (default `3000`).
-
-### 5. Check it is working
-
-```bash
-curl http://localhost:3000/api/health
-# {"success":true,"data":{"status":"ok"}}
-```
-
-If the database is unreachable, the endpoint responds `500` with
-`{"success":false,"data":{"message":"Database connection failed"}}`.
-
-## Scripts
-
-From `core-service/`:
-
-| Script | Description |
+| Area | Status |
 | --- | --- |
-| `npm run dev` | Run `src/server.ts` with `tsx watch` (reloads on change) |
-| `npm run build` | Type-check and compile to `dist/` with `tsc` |
-| `npm start` | Run the compiled server from `dist/server.js` |
-| `npm run knex -- <cmd>` | Run a Knex CLI command against `knexfile.ts` |
-
-From the repository root:
-
-| Script | Description |
-| --- | --- |
-| `npm run knex -- <cmd>` | Proxy to the `core-service` Knex CLI |
-
-## Known Issues
-
-**Existing databases after pulling the migration renames.** Two `core-service`
-migrations were renamed so a fresh database can be built from scratch. Run
-`npm --prefix core-service run migrate` (not the raw `knex migrate:latest`): it
-first rewrites the old names in `knex_migrations`, then migrates. Running knex
-directly on an old database fails with "migration directory is corrupt".
-
-**Other open items:**
-
-- **Staff invitations:** the invite OTP is logged to the console and not
-  emailed. `createMember` returns errors from its transaction instead of
-  throwing them.
-- Refresh tokens are not rotated or revocable; reset OTPs are not single-use.
-- No automated test suite; verification lives in `order-service/play/` scripts
-  (untracked) and manual passes recorded in `order-service/docs/status.md`.
+| core-service | ✅ Implemented |
+| order-service | ✅ All planned phases built and verified against real Postgres, Redis, RabbitMQ and Kashier test mode |
+| analytics-service | ✅ Implemented (daily rollups, RBAC-protected API) |
+| Docker Compose | 🚧 In progress |
+| Automated tests | ⏳ Not started — verification so far is scripted manual checks (see [`order-service/docs/status.md`](order-service/docs/status.md)) |
+| OpenAPI docs | ⏳ Planned — endpoints are documented in [`order-service/docs/api-contracts.md`](order-service/docs/api-contracts.md) and [`analytics-service/docs/api-contracts.md`](analytics-service/docs/api-contracts.md) |
 
 ## Documentation
 
-- [Development workflow](docs/development-workflow.md): how a feature is built
-  layer by layer, from migration to route.
-
-## Roadmap
-
-### Core Service
-
-Completed:
-
-- [x] Layered module structure with `tsyringe` DI
-- [x] User accounts and system roles
-- [x] JWT authentication with access and refresh tokens in `httpOnly` cookies
-- [x] Password reset with hashed, expiring email OTPs
-- [x] Restaurants with lifecycle status and paginated listing
-- [x] Branches with PostGIS nearby search
-- [x] RBAC: restaurant roles, permissions, members, branch scoping
-- [x] Product data model with per-branch details and the auto-populating trigger
-- [x] Redis response cache and idempotency middleware
-- [x] Correlation IDs, structured logging, centralized errors, env validation
-- [x] Health check endpoint
-
-Remaining:
-
-- [x] Fix migration ordering and the `users` / `customer_addresses` schema drift
-- [x] Seed roles and permissions
-- [x] Mount the product and address routes
-- [x] Fix the system-admin bypass in `rbac()`
-- [ ] Send invitation emails. Make reset OTPs single-use by checking
-      `consumed_at`.
-- [ ] Rotate refresh tokens and allow revoking them
-- [x] Redact sensitive fields in logs.
-- [ ] Use the incoming correlation ID when one is provided.
-- [ ] Automated test suite (unit + integration against PostgreSQL)
-- [ ] OpenAPI documentation
-- [ ] Dockerized local setup (PostgreSQL + PostGIS, Redis)
-
-### Additional Services
-
-- [x] `order-service`: orders, payments (Kashier v3) and refunds, delivery
-      dispatch, restaurant finance, cold archival — all phases built
-- [ ] `analytics-service`: reporting and business metrics, fed by events
-      published from the `event_outbox` table
-
-## Project Direction
-
-The project is being built one service at a time. `core-service` comes first
-because every other service depends on its identity, restaurant, branch and
-catalogue data. It already has some groundwork for a service-oriented setup: the
-modules have clear boundaries, the infrastructure sits behind interfaces, and
-the `event_outbox` and `api_keys` tables are in the schema. The next steps are
-to close the known issues and add tests, then to start `order-service` as the
-first separate service. The platform is not yet a set of microservices, and
-this README does not claim that it is.
+- [Development workflow](docs/development-workflow.md) — how a feature is built, layer by layer
+- [order-service docs](order-service/docs/README.md) — system design, API contracts, database design, business rules
+- [analytics-service system design](analytics-service/docs/system-design.md)
