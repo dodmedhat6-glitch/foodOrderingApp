@@ -20,3 +20,6 @@ coverage/
 /core-service/.mcp.json
 # Nested standalone repo - order-service has its own git history
 order-service/
+
+#test
+.env.test

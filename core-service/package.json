@@ -5,7 +5,10 @@
     "start": "node dist/server.js",
     "worker:dev": "tsx watch src/worker.ts",
     "worker": "node dist/worker.js",
-    "knex": "tsx ./node_modules/knex/bin/cli.js --knexfile knexfile.ts"
+    "knex": "tsx ./node_modules/knex/bin/cli.js --knexfile knexfile.ts",
+    "test": "jest",
+    "test:integration": "jest --config jest.integration.config.js",
+    "test:watch": "jest --watch"
   },
   "dependencies": {
     "@types/cors": "^2.8.19",
@@ -33,14 +36,20 @@
     "zod": "^4.4.3"
   },
   "devDependencies": {
+    "@swc/core": "^1.16.18",
+    "@swc/jest": "^0.2.39",
     "@types/amqplib": "^0.10.8",
     "@types/bcrypt": "^6.0.0",
     "@types/cookie-parser": "^1.4.10",
     "@types/express": "^5.0.6",
+    "@types/jest": "^30.0.0",
     "@types/jsonwebtoken": "^9.0.10",
     "@types/node": "^26.2.0",
+    "@types/supertest": "^7.2.1",
     "eslint": "^10.8.1",
+    "jest": "^30.5.2",
     "prettier": "^3.9.6",
+    "supertest": "^7.3.1",
     "typescript": "^7.0.2"
   },
   "allowScripts": {

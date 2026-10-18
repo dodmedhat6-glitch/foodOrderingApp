@@ -111,3 +111,77 @@ export async function reserveBranchStock(
 
     return { reserved, unavailable };
 }
+
+export interface MissingLine {
+    productId: number;
+    quantity: number;
+}
+
+/**
+ * Returns units to branch stock — the compensating half of
+ * `reserveBranchStock`.
+ *
+ * order-service reserves stock *before* it writes the order (so a customer is
+ * never told "placed" for units it couldn't hold), which means every failure
+ * after the reserve and before the commit has to give the units back. This is
+ * that call.
+ *
+ * Two deliberate differences from the reserve path:
+ *
+ *  - It cannot fail on a per-line basis. An increment has no upper bound to
+ *    violate, so there is no `unavailable` case; a product row that has since
+ *    been deleted is reported in `missing` and skipped rather than failing the
+ *    whole release, because the alternative is leaking the units that *could*
+ *    have been returned.
+ *  - It does not re-check `is_available`. A product turned off between the
+ *    reserve and the release still owes the units back.
+ *
+ * Rows are locked FOR UPDATE in ascending product_id order, the same order
+ * `reserveBranchStock` uses, so a release overlapping a concurrent reserve on
+ * the same two products cannot deadlock against it.
+ */
+export async function releaseBranchStock(
+    branchId: number,
+    lines: ReserveStockLine[],
+    conn: Knex
+): Promise<{ released: ReservedLine[]; missing: MissingLine[] }> {
+    if (lines.length === 0) {
+        return { released: [], missing: [] };
+    }
+
+    const requestedByProduct = new Map<number, number>();
+    for (const line of lines) {
+        requestedByProduct.set(line.productId, (requestedByProduct.get(line.productId) ?? 0) + line.quantity);
+    }
+    const productIds = [...requestedByProduct.keys()].sort((a, b) => a - b);
+
+    const rows = await conn("product_branch_details")
+        .select(PBD_COLUMNS)
+        .where("branch_id", branchId)
+        .whereIn("product_id", productIds)
+        .orderBy("product_id", "asc")
+        .forUpdate();
+
+    const present = new Set<number>(rows.map((row: any) => Number(row.product_id)));
+
+    const released: ReservedLine[] = [];
+    const missing: MissingLine[] = [];
+
+    for (const productId of productIds) {
+        const quantity = requestedByProduct.get(productId)!;
+        if (!present.has(productId)) {
+            missing.push({ productId, quantity });
+            continue;
+        }
+
+        const [row] = await conn("product_branch_details")
+            .where("branch_id", branchId)
+            .where("product_id", productId)
+            .increment("stock", quantity)
+            .returning(PBD_COLUMNS);
+
+        released.push({ productId, quantity, remainingStock: row.stock });
+    }
+
+    return { released, missing };
+}

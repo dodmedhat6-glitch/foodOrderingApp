@@ -31,7 +31,16 @@ export function rbac(options: RBACOptions) {
             const {resource, action, allowSystemAdmin = true} = options;
 
             // if he is a system admin -> bypass
-            if (!allowSystemAdmin && req.user.role == SystemRole.SYSTEM_ADMIN) {
+            //
+            // The condition was `!allowSystemAdmin && ...`, which inverted the
+            // option it reads: a system admin was bypassed only on the
+            // endpoints that had opted *out* of the bypass, and on every
+            // ordinary endpoint fell through to the "not a restaurant user"
+            // 403 at the bottom. So no system admin could use any rbac-gated
+            // route, and the few routes meant to exclude them were the only
+            // ones that let them in. order-service's copy of this middleware
+            // has it the right way round.
+            if (allowSystemAdmin && req.user.role == SystemRole.SYSTEM_ADMIN) {
                 return next();
             }
             // if restaurant user

@@ -1,21 +1,30 @@
-import { injectable } from "tsyringe";
+import { Knex } from "knex";
+import { inject, injectable } from "tsyringe";
 import { db } from "../../../lib/knex/kenx";
 import { findBranchById } from "../../branch/repository/branch.repository";
 import { findAddressById } from "../../addresses/repository/customer-address.repo";
 import { findUserById } from "../../user/repository/user.repo";
 import { findProductsByIdsAndBranch } from "../../product/repository/product.repository";
 import {
+    MissingLine,
     ReserveStockLine,
     ReservedLine,
+    releaseBranchStock,
     reserveBranchStock,
 } from "../../product/repository/product-branch-details.repository";
 import { findRestaurantById } from "../../restaurant/repository/restaurant.repo";
 import { enqueueOutboxEvent } from "../../outbox/repository/outbox.repo";
 import {
-    buildInvalidationPayload,
+    buildProductInvalidationPayload,
     invalidationChannel,
     invalidationEventType,
 } from "../../../lib/events/events";
+import { tokens } from "../../../lib/di/tokens";
+import { ICacheProvider } from "../../../pkg/cache/cache.interface";
+import {
+    INTERNAL_BRANCH_LOOKUP_TTL_SEC,
+    internalBranchLookupKey,
+} from "../../../lib/cache/cache-keys";
 import { BranchNotFoundError } from "../../branch/errors";
 import { AddressNotFoundError } from "../../addresses/errors";
 import { UserNotFound } from "../../user/errors";
@@ -66,6 +75,16 @@ export interface ReserveStockResponse {
     reserved: ReservedLine[];
 }
 
+export interface ReleaseStockResponse {
+    released: ReservedLine[];
+    /**
+     * Lines whose product_branch_details row no longer exists, so the units
+     * could not be returned anywhere. Reported rather than thrown: the caller
+     * is compensating a failed order and must not be handed a second failure.
+     */
+    missing: MissingLine[];
+}
+
 /**
  * Shapes core-service's own entities into the exact lookup contracts
  * order-service's core-client codes against - see order-service's
@@ -75,6 +94,9 @@ export interface ReserveStockResponse {
  */
 @injectable()
 export class InternalService {
+    constructor(@inject(tokens.CacheProvider) private readonly cache: ICacheProvider) {
+    }
+
     /**
      * Everything order-service needs to price and authorise one checkout
      * against this branch: the trading flags it refuses an order on, the
@@ -84,6 +106,21 @@ export class InternalService {
      * second round trip.
      */
     getBranch = async (branchId: number): Promise<BranchLookupResponse> => {
+        const key = internalBranchLookupKey(branchId);
+        const cached = await this.cache.get(key).catch(() => null);
+        if (cached) {
+            return JSON.parse(cached) as BranchLookupResponse;
+        }
+
+        const lookup = await this.buildBranchLookup(branchId);
+
+        // A cache write failure must not fail the lookup an order placement is
+        // waiting on.
+        await this.cache.set(key, JSON.stringify(lookup), INTERNAL_BRANCH_LOOKUP_TTL_SEC).catch(() => {});
+        return lookup;
+    }
+
+    private buildBranchLookup = async (branchId: number): Promise<BranchLookupResponse> => {
         const branch = await findBranchById(branchId);
         if (!branch) {
             throw BranchNotFoundError;
@@ -167,15 +204,7 @@ export class InternalService {
                 throw new AppError("OutOfStock", 409, true, { details: unavailable });
             }
 
-            for (const line of reserved) {
-                await enqueueOutboxEvent({
-                    channel: invalidationChannel("product"),
-                    eventType: invalidationEventType("product"),
-                    entityType: "product",
-                    entityId: line.productId,
-                    payload: buildInvalidationPayload(line.productId),
-                }, trx);
-            }
+            await this.enqueueStockEvents(branchId, reserved, trx);
 
             await trx.commit();
             return { reserved };
@@ -184,6 +213,77 @@ export class InternalService {
                 await trx.rollback();
             }
             throw error;
+        }
+    }
+
+    /**
+     * Gives back units a reserve already held — the compensating action for an
+     * order-service placement that failed after its stock was reserved.
+     *
+     * Reserve-then-write means the units are held for the few milliseconds
+     * order-service needs to commit its order rows. If that commit fails, or
+     * the request dies between the two, the units are owed back and only the
+     * caller knows it. So this is a plain compensating write with no
+     * all-or-nothing semantics to enforce: it returns what it could return and
+     * names what it could not (`missing`), rather than refusing the whole
+     * release because one product has since been deleted.
+     *
+     * Not an "undo" in any transactional sense — there is no record of the
+     * original reserve to match against, and deliberately so: pairing them
+     * would mean a reservations ledger, which is the design this service
+     * explicitly does not have (stock is a single column). The consequence is
+     * that a duplicated release over-credits stock, so order-service must call
+     * this at most once per reserve, which is what its idempotency key on
+     * `POST /orders` guarantees.
+     */
+    releaseStock = async (branchId: number, lines: ReserveStockLine[]): Promise<ReleaseStockResponse> => {
+        const branch = await findBranchById(branchId);
+        if (!branch) {
+            throw BranchNotFoundError;
+        }
+
+        const trx = await db.transaction();
+        try {
+            const { released, missing } = await releaseBranchStock(branchId, lines, trx);
+            await this.enqueueStockEvents(branchId, released, trx);
+
+            await trx.commit();
+            return { released, missing };
+        } catch (error) {
+            if (!trx.isCompleted()) {
+                await trx.rollback();
+            }
+            throw error;
+        }
+    }
+
+    /**
+     * One product invalidation event per line that actually moved, in the same
+     * transaction as the movement — so order-service's projection is corrected
+     * if and only if the stock changed.
+     *
+     * The payload carries `branchId` and the post-write `stock`, which is what
+     * lets order-service *patch* its cached product projection rather than drop
+     * it: a dropped projection costs an HTTP round trip on the next placement,
+     * and stock moves on every single order. Everything here is read from the
+     * row the decrement/increment returned, never computed.
+     */
+    private enqueueStockEvents = async (
+        branchId: number,
+        lines: ReservedLine[],
+        trx: Knex.Transaction
+    ): Promise<void> => {
+        for (const line of lines) {
+            await enqueueOutboxEvent({
+                channel: invalidationChannel("product"),
+                eventType: invalidationEventType("product"),
+                entityType: "product",
+                entityId: line.productId,
+                payload: buildProductInvalidationPayload(line.productId, {
+                    branchId,
+                    stock: line.remainingStock,
+                }),
+            }, trx);
         }
     }
 }

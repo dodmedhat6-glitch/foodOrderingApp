@@ -5,13 +5,19 @@ import {BranchNotFoundError} from "../errors";
 import {SystemRole} from "../../user/enums";
 import {CreateBranchDTO, UpdateBranchDTO, UpdateBranchStatusDTO} from "../dto/branch.dto";
 import {findNearbyBranches, createBranch, findBranchesByRestaurant, findBranchById, updateBranch, updateBranchStatus} from "../repository/branch.repository";
-import {injectable} from "tsyringe";
+import {inject, injectable} from "tsyringe";
 import {db} from "../../../lib/knex/kenx";
 import {enqueueOutboxEvent} from "../../outbox/repository/outbox.repo";
-import {buildInvalidationPayload, invalidationChannel, invalidationEventType} from "../../../lib/events/events";
+import {buildBranchInvalidationPayload, invalidationChannel, invalidationEventType} from "../../../lib/events/events";
+import {tokens} from "../../../lib/di/tokens";
+import {ICacheProvider} from "../../../pkg/cache/cache.interface";
+import {internalBranchLookupKey} from "../../../lib/cache/cache-keys";
 
 @injectable()
 export class BranchService {
+
+    constructor(@inject(tokens.CacheProvider) private readonly cache: ICacheProvider) {
+    }
 
     findNearby = async (lat:number, lng:number) => {
         const rows = await findNearbyBranches(lat, lng);
@@ -67,26 +73,42 @@ export class BranchService {
 
         // acceptOrders is operational status order-service caches - see
         // this.updateStatus for why both writers go through the outbox.
+        //
+        // Every field this endpoint can touch (label, address, delivery fee,
+        // currency) is part of the internal branch lookup, so this service's
+        // own cache of it is dropped on both paths - not only the one that
+        // publishes an event.
         if (data.acceptOrders === undefined) {
-            return await updateBranch(branchId, data);
+            const updated = await updateBranch(branchId, data);
+            await this.forgetBranchLookup(branchId);
+            return updated;
         }
 
         const trx = await db.transaction();
+        let updated;
         try {
-            const updated = await updateBranch(branchId, data, trx);
+            updated = await updateBranch(branchId, data, trx);
             await enqueueOutboxEvent({
                 channel: invalidationChannel("branch"),
                 eventType: invalidationEventType("branch"),
                 entityType: "branch",
                 entityId: branchId,
-                payload: buildInvalidationPayload(branchId),
+                // The transaction has the new trading flags in hand, so they
+                // ride along: order-service can patch its branch projection
+                // instead of dropping it and re-reading on the next placement.
+                payload: buildBranchInvalidationPayload(branchId, {
+                    isActive: updated.isActive,
+                    acceptOrders: updated.acceptOrders,
+                }),
             }, trx);
             await trx.commit();
-            return updated;
         } catch (error) {
             await trx.rollback();
             throw error;
         }
+
+        await this.forgetBranchLookup(branchId);
+        return updated;
     }
 
     updateStatus = async (branchId: number, userRole: SystemRole, data: UpdateBranchStatusDTO) => {
@@ -104,22 +126,41 @@ export class BranchService {
         // must commit together, or a branch core-service has just closed
         // can silently keep accepting orders on order-service's stale read.
         const trx = await db.transaction();
+        let updated;
         try {
-            const updated = await updateBranchStatus(branchId, data, trx);
+            updated = await updateBranchStatus(branchId, data, trx);
             if (data.isActive !== undefined) {
                 await enqueueOutboxEvent({
                     channel: invalidationChannel("branch"),
                     eventType: invalidationEventType("branch"),
                     entityType: "branch",
                     entityId: branchId,
-                    payload: buildInvalidationPayload(branchId),
+                    payload: buildBranchInvalidationPayload(branchId, {
+                        isActive: updated.isActive,
+                        acceptOrders: updated.acceptOrders,
+                    }),
                 }, trx);
             }
             await trx.commit();
-            return updated;
         } catch (error) {
             await trx.rollback();
             throw error;
         }
+
+        // Also on the commission-only path: commission is in the lookup too.
+        await this.forgetBranchLookup(branchId);
+        return updated;
+    }
+
+    /**
+     * Drops this service's cached copy of the internal branch lookup
+     * (lib/cache/cache-keys.ts). Best-effort and always *after* commit: a
+     * Redis failure must not roll back a write that succeeded, and the
+     * 300s TTL is the backstop. Deleting before the commit would be the
+     * actually-wrong order - a concurrent read could repopulate the key from
+     * the pre-commit row.
+     */
+    private forgetBranchLookup = async (branchId: number): Promise<void> => {
+        await this.cache.del(internalBranchLookupKey(branchId)).catch(() => {});
     }
 }

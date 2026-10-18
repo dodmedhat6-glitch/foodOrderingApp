@@ -53,3 +53,15 @@ internalRouter.post(
     rbac({ resource: "core:product", action: "reserve" }),
     internalController.reserveStock
 );
+
+// The compensating half of reserve-stock: returns units an order-service
+// placement reserved but never used. Gated on the same `core:product:reserve`
+// permission rather than a new one — holding units and giving them back are
+// two directions of one capability, and a caller allowed to do the first must
+// be able to do the second or it leaks stock on every failed placement.
+internalRouter.post(
+    "/branches/:branchId/release-stock",
+    apiKeyAuth,
+    rbac({ resource: "core:product", action: "reserve" }),
+    internalController.releaseStock
+);
