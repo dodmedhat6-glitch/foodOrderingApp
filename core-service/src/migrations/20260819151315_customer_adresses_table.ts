@@ -17,7 +17,7 @@ export async function up(knex: Knex): Promise<void> {
             street VARCHAR(100) NOT NULL,
             building VARCHAR(100) NOT NULL,
             apartment_number VARCHAR(100) NOT NULL,
-            type VARCHAR(50) NOT NULL CHECK (type IN ('home', 'work', 'other'))
+            type VARCHAR(50) NOT NULL CHECK (type IN ('office', 'home', 'public_place'))
         );
         CREATE INDEX IF NOT EXISTS idx_customer_addresses_user_id ON customer_addresses(user_id);
     `);

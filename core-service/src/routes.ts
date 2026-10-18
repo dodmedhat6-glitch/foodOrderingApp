@@ -6,6 +6,7 @@ import {restaurantRouter} from "./app/restaurant/routes";
 import {branchRouter} from "./app/branch/routes";
 import {rbacRouter} from "./app/rbac/routes";
 import {internalRouter} from "./app/internal/routes";
+import {productRouter} from "./app/product/routes";
 export const router = Router();
 
 router.use("/health", healthRouter)
@@ -17,6 +18,8 @@ router.use("/user" , userRouter)
 router.use('/restaurant' , restaurantRouter)
 
 router.use('/' , branchRouter)
+
+router.use('/' , productRouter)
 
 router.use('/' , rbacRouter)
 

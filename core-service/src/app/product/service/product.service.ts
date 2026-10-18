@@ -10,7 +10,7 @@ import {updateBranchDetails} from "../repository/product-branch-details.reposito
 import {injectable} from "tsyringe";
 import {db} from "../../../lib/knex/kenx";
 import {enqueueOutboxEvent} from "../../outbox/repository/outbox.repo";
-import {buildInvalidationPayload, invalidationChannel, invalidationEventType} from "../../../lib/events/events";
+import {buildProductInvalidationPayload, invalidationChannel, invalidationEventType} from "../../../lib/events/events";
 
 @injectable()
 export class ProductService {
@@ -106,15 +106,27 @@ export class ProductService {
                     isAvailable: data.isAvailable,
                 }, trx);
 
-                // order-service caches product price/stock/isAvailable
-                // (cache:core:product:{id}) and must invalidate on this exact
-                // write - see docs/01-system-design.md §5.1 on the order-service side.
+                // order-service caches product price/stock/isAvailable per
+                // branch+product and must invalidate on this exact write - see
+                // docs/01-system-design.md §5.1 on the order-service side.
+                //
+                // The post-write row is right here, so the payload carries it:
+                // order-service patches its projection instead of dropping it.
+                // `name`/`imageUrl` are deliberately not included even though
+                // this method can change them - they live on `products`, not
+                // on the branch row, and a partial patch is only safe for
+                // fields the consumer can overwrite wholesale.
                 await enqueueOutboxEvent({
                     channel: invalidationChannel("product"),
                     eventType: invalidationEventType("product"),
                     entityType: "product",
                     entityId: productId,
-                    payload: buildInvalidationPayload(productId),
+                    payload: buildProductInvalidationPayload(productId, {
+                        branchId: branchId!,
+                        unitPriceMinor: branchDetails.price,
+                        stock: branchDetails.stock,
+                        isAvailable: branchDetails.isAvailable,
+                    }),
                 }, trx);
             }
 

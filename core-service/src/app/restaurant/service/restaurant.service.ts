@@ -12,15 +12,22 @@ import {SystemRole} from "../../user/enums";
 import {UpdateRestaurantDTO, UpdateRestaurantStatusDTO} from "../dto/restaurant.dto";
 import {RestaurantNotFoundError} from "../errors";
 import {UnAuthorisedError} from "../../../lib/auth/error";
-import {injectable} from "tsyringe";
+import {inject, injectable} from "tsyringe";
 import {buildPaginationResult, FilterParams, PaginationParams} from "../../../lib/http/pagination/cursor.pagination";
 import {db} from "../../../lib/knex/kenx";
 import {enqueueOutboxEvent} from "../../outbox/repository/outbox.repo";
 import {buildInvalidationPayload, invalidationChannel, invalidationEventType} from "../../../lib/events/events";
+import {tokens} from "../../../lib/di/tokens";
+import {ICacheProvider} from "../../../pkg/cache/cache.interface";
+import {internalBranchLookupKey} from "../../../lib/cache/cache-keys";
+import {findBranchesByRestaurant} from "../../branch/repository/branch.repository";
 
 
 @injectable()
 export class RestaurantService{
+
+    constructor(@inject(tokens.CacheProvider) private readonly cache: ICacheProvider) {
+    }
 
     create = async (userId:number , data: RegisterRestaurantDto , trx:Knex) =>{
         const now = new Date();
@@ -68,8 +75,9 @@ export class RestaurantService{
         // (cache:core:restaurant:{id}) - write + invalidation event commit
         // together via the outbox, same reasoning as branch.service.ts.
         const trx = await db.transaction();
+        let updated;
         try {
-            const updated = await updateRestaurantStatus(id, data.status, trx);
+            updated = await updateRestaurantStatus(id, data.status, trx);
             await enqueueOutboxEvent({
                 channel: invalidationChannel("restaurant"),
                 eventType: invalidationEventType("restaurant"),
@@ -78,10 +86,33 @@ export class RestaurantService{
                 payload: buildInvalidationPayload(id),
             }, trx);
             await trx.commit();
-            return updated;
         } catch (error) {
             await trx.rollback();
             throw error;
+        }
+
+        await this.forgetBranchLookups(id);
+        return updated;
+    }
+
+    /**
+     * The internal branch lookup joins this restaurant's status into every one
+     * of its branches (internal.service.getBranch), so suspending a restaurant
+     * has to drop all of them - otherwise order-service keeps reading an
+     * `active` restaurant through a cached branch row for the full TTL and
+     * keeps accepting orders for a suspended restaurant.
+     *
+     * Enumerated rather than pattern-deleted: a restaurant has a handful of
+     * branches, and core's cache provider has no cursor-scan delete.
+     */
+    private forgetBranchLookups = async (restaurantId: number): Promise<void> => {
+        try {
+            const branches = await findBranchesByRestaurant(restaurantId);
+            await Promise.all(
+                branches.map((branch) => this.cache.del(internalBranchLookupKey(branch.id)))
+            );
+        } catch {
+            // Best-effort after a committed write; the lookup TTL is the backstop.
         }
     }
 }
