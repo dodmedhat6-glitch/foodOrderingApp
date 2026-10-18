@@ -7,6 +7,7 @@ import {branchRouter} from "./app/branch/routes";
 import {rbacRouter} from "./app/rbac/routes";
 import {internalRouter} from "./app/internal/routes";
 import {productRouter} from "./app/product/routes";
+import {customerAddressRouter} from "./app/addresses/routes";
 export const router = Router();
 
 router.use("/health", healthRouter)
@@ -19,9 +20,13 @@ router.use('/restaurant' , restaurantRouter)
 
 router.use('/' , branchRouter)
 
+router.use('/' , rbacRouter)
+
+// Catalogue: /restaurants/:restaurantId/categories|products, /branches/:branchId/products, /products/:id
 router.use('/' , productRouter)
 
-router.use('/' , rbacRouter)
+// The caller's own delivery addresses (customer, JWT-scoped)
+router.use('/addresses' , customerAddressRouter)
 
 // service-to-service surface for order-service - api-key authenticated, see app/internal/routes.ts
 router.use('/internal' , internalRouter)

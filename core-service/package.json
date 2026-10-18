@@ -6,6 +6,7 @@
     "worker:dev": "tsx watch src/worker.ts",
     "worker": "node dist/worker.js",
     "knex": "tsx ./node_modules/knex/bin/cli.js --knexfile knexfile.ts",
+    "migrate": "tsx src/lib/knex/rename-legacy-migrations.ts && npm run knex -- migrate:latest",
     "test": "jest",
     "test:integration": "jest --config jest.integration.config.js",
     "test:watch": "jest --watch"

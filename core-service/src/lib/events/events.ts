@@ -23,7 +23,7 @@
  * suspended). order-service relies on that: deleting its branch projection
  * is enough, because the next order placement re-reads from core and sees
  * the current acceptOrders/status. See order-service's docs/system-design.md
- * and docs/implementation-plan.md Phase 1.
+ * and docs/status.md Phase 1.
  *
  * `invalidationChannel` is vestigial: it names the Redis Pub/Sub channel
  * from the design that preceded RabbitMQ, and is still persisted in

@@ -26,7 +26,16 @@ productRouter.post('/restaurants/:restaurantId/products',
     rbac({resource:"core:product", action:'create'}),
     productController.create
 );
+// Product-level fields (name, description, image, category). No branch in the
+// path, so no requireBranchAccess - it would 400 every call. Ownership of the
+// product's restaurant is checked in ProductService.update.
 productRouter.patch('/products/:id',
+    authenticate,
+    rbac({resource:"core:product", action:'update'}),
+    productController.update
+);
+// Per-branch price / stock / availability, scoped to a branch the caller can access.
+productRouter.patch('/branches/:branchId/products/:id',
     authenticate,
     requireBranchAccess('branchId'),
     rbac({resource:"core:product", action:'update'}),

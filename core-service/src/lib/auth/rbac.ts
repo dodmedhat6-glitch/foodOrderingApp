@@ -6,6 +6,7 @@ import {PermissionsCashService} from "../../app/rbac/service/permissions-cash.se
 import {container} from "../di/containers";
 import {tokens} from "../di/tokens";
 import {sendError} from "../http/response";
+import {findBranchById} from "../../app/branch/repository/branch.repository";
 
 const permissionCashService = container.resolve<PermissionsCashService>(tokens.PermissionCashService);
 
@@ -31,15 +32,6 @@ export function rbac(options: RBACOptions) {
             const {resource, action, allowSystemAdmin = true} = options;
 
             // if he is a system admin -> bypass
-            //
-            // The condition was `!allowSystemAdmin && ...`, which inverted the
-            // option it reads: a system admin was bypassed only on the
-            // endpoints that had opted *out* of the bypass, and on every
-            // ordinary endpoint fell through to the "not a restaurant user"
-            // 403 at the bottom. So no system admin could use any rbac-gated
-            // route, and the few routes meant to exclude them were the only
-            // ones that let them in. order-service's copy of this middleware
-            // has it the right way round.
             if (allowSystemAdmin && req.user.role == SystemRole.SYSTEM_ADMIN) {
                 return next();
             }
@@ -103,6 +95,19 @@ export function requireBranchAccess(paramName: string = 'branchId') {
         }
 
         if (req.user.role !== SystemRole.RESTAURANT_USER) {
+            return sendError(res, "Permission denied", 403);
+        }
+
+        // An owner is scoped to the whole restaurant and is usually assigned
+        // to no branch at all (branchIds is [] from registration), so the
+        // member-branch list cannot answer for them. These routes carry no
+        // restaurantId to check membership against, so the branch's own
+        // restaurant is the answer.
+        if (req.user.restaurantRole === "owner") {
+            const branch = await findBranchById(branchId);
+            if (branch && Number(branch.restaurantId) === Number(req.user.restaurantId)) {
+                return next();
+            }
             return sendError(res, "Permission denied", 403);
         }
 

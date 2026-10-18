@@ -217,31 +217,18 @@ export class InternalService {
     }
 
     /**
-     * Gives back units a reserve already held — the compensating action for an
-     * order-service placement that failed after its stock was reserved.
+     * The inverse of `reserveStock`: returns units order-service no longer
+     * needs - a placement that failed after reserving, an unpaid checkout that
+     * expired, an order rejected or cancelled before pickup.
      *
-     * Reserve-then-write means the units are held for the few milliseconds
-     * order-service needs to commit its order rows. If that commit fails, or
-     * the request dies between the two, the units are owed back and only the
-     * caller knows it. So this is a plain compensating write with no
-     * all-or-nothing semantics to enforce: it returns what it could return and
-     * names what it could not (`missing`), rather than refusing the whole
-     * release because one product has since been deleted.
+     * No branch lookup first, unlike the reserve: a branch that has gone away
+     * simply has no rows, so every line comes back in `missing` rather than as
+     * a 404 the compensating caller can do nothing with.
      *
-     * Not an "undo" in any transactional sense — there is no record of the
-     * original reserve to match against, and deliberately so: pairing them
-     * would mean a reservations ledger, which is the design this service
-     * explicitly does not have (stock is a single column). The consequence is
-     * that a duplicated release over-credits stock, so order-service must call
-     * this at most once per reserve, which is what its idempotency key on
-     * `POST /orders` guarantees.
+     * Same outbox rule as the reserve - one invalidation per line whose stock
+     * actually moved, in the same transaction as the move.
      */
     releaseStock = async (branchId: number, lines: ReserveStockLine[]): Promise<ReleaseStockResponse> => {
-        const branch = await findBranchById(branchId);
-        if (!branch) {
-            throw BranchNotFoundError;
-        }
-
         const trx = await db.transaction();
         try {
             const { released, missing } = await releaseBranchStock(branchId, lines, trx);

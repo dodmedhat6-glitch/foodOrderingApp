@@ -15,7 +15,8 @@ function toEntity(row: any): ProductBranchDetails {
     });
 }
 
-export async function updateBranchDetails(branchId: number, productId: number, data: {price?: number, stock?: number, isAvailable?: boolean}, conn: Knex = db): Promise<ProductBranchDetails> {
+/** Undefined when the product is not sold at that branch (no details row). */
+export async function updateBranchDetails(branchId: number, productId: number, data: {price?: number, stock?: number, isAvailable?: boolean}, conn: Knex = db): Promise<ProductBranchDetails | undefined> {
     const [row] = await conn("product_branch_details")
         .where("branch_id", branchId)
         .where("product_id", productId)
@@ -25,7 +26,7 @@ export async function updateBranchDetails(branchId: number, productId: number, d
             is_available: data.isAvailable,
         })
         .returning(PBD_COLUMNS);
-    return toEntity(row);
+    return row ? toEntity(row) : undefined;
 }
 
 export interface ReserveStockLine {
@@ -118,27 +119,20 @@ export interface MissingLine {
 }
 
 /**
- * Returns units to branch stock — the compensating half of
- * `reserveBranchStock`.
+ * Gives back units a `reserveBranchStock` held - the compensation
+ * order-service runs when an order that already reserved is never written,
+ * or is rejected/cancelled before delivery.
  *
- * order-service reserves stock *before* it writes the order (so a customer is
- * never told "placed" for units it couldn't hold), which means every failure
- * after the reserve and before the commit has to give the units back. This is
- * that call.
+ * Same lock discipline as the reserve (FOR UPDATE, ascending product_id), so a
+ * release and a reserve that overlap on two products can't deadlock each
+ * other.
  *
- * Two deliberate differences from the reserve path:
- *
- *  - It cannot fail on a per-line basis. An increment has no upper bound to
- *    violate, so there is no `unavailable` case; a product row that has since
- *    been deleted is reported in `missing` and skipped rather than failing the
- *    whole release, because the alternative is leaking the units that *could*
- *    have been returned.
- *  - It does not re-check `is_available`. A product turned off between the
- *    reserve and the release still owes the units back.
- *
- * Rows are locked FOR UPDATE in ascending product_id order, the same order
- * `reserveBranchStock` uses, so a release overlapping a concurrent reserve on
- * the same two products cannot deadlock against it.
+ * Never fails on a vanished row: the caller is already compensating something
+ * and has nothing useful to do with a second error. A product whose branch row
+ * is gone is reported in `missing` instead - the units had nowhere to return
+ * to, which is worth logging but not worth failing over. `is_available` is
+ * deliberately not checked: a product switched off since the reserve still
+ * owns the stock it was holding.
  */
 export async function releaseBranchStock(
     branchId: number,
@@ -149,26 +143,24 @@ export async function releaseBranchStock(
         return { released: [], missing: [] };
     }
 
-    const requestedByProduct = new Map<number, number>();
+    const quantityByProduct = new Map<number, number>();
     for (const line of lines) {
-        requestedByProduct.set(line.productId, (requestedByProduct.get(line.productId) ?? 0) + line.quantity);
+        quantityByProduct.set(line.productId, (quantityByProduct.get(line.productId) ?? 0) + line.quantity);
     }
-    const productIds = [...requestedByProduct.keys()].sort((a, b) => a - b);
+    const productIds = [...quantityByProduct.keys()].sort((a, b) => a - b);
 
     const rows = await conn("product_branch_details")
-        .select(PBD_COLUMNS)
+        .select("product_id")
         .where("branch_id", branchId)
         .whereIn("product_id", productIds)
         .orderBy("product_id", "asc")
         .forUpdate();
-
     const present = new Set<number>(rows.map((row: any) => Number(row.product_id)));
 
     const released: ReservedLine[] = [];
     const missing: MissingLine[] = [];
-
     for (const productId of productIds) {
-        const quantity = requestedByProduct.get(productId)!;
+        const quantity = quantityByProduct.get(productId)!;
         if (!present.has(productId)) {
             missing.push({ productId, quantity });
             continue;

@@ -66,7 +66,7 @@ export class InternalController {
         try {
             const result = await this.internalService.reserveStock(
                 branchIdParam(req),
-                parseReserveStockLines(req.body?.items)
+                parseStockLines(req.body?.items)
             );
             sendSuccess(res, result);
         } catch (err) {
@@ -75,17 +75,14 @@ export class InternalController {
     }
 
     /**
-     * POST /api/internal/branches/:branchId/release-stock
-     *
-     * The compensating call for a reserve whose order never got written. Same
-     * body shape as reserve-stock, deliberately: order-service replays the
-     * exact lines it reserved.
+     * POST /api/internal/branches/:branchId/release-stock - the compensation
+     * for `reserveStock`, same body shape.
      */
     releaseStock = async (req: Request, res: Response, next: NextFunction) => {
         try {
             const result = await this.internalService.releaseStock(
                 branchIdParam(req),
-                parseReserveStockLines(req.body?.items)
+                parseStockLines(req.body?.items)
             );
             sendSuccess(res, result);
         } catch (err) {
@@ -102,7 +99,7 @@ function branchIdParam(req: Request): number {
     return branchId;
 }
 
-function parseReserveStockLines(raw: unknown): ReserveStockLine[] {
+function parseStockLines(raw: unknown): ReserveStockLine[] {
     if (!Array.isArray(raw) || raw.length === 0) {
         throw new AppError("items must be a non-empty array", 400);
     }
