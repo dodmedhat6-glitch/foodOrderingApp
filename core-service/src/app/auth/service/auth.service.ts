@@ -1,6 +1,6 @@
 import {injectable, inject} from "tsyringe";
 import {tokens} from "../../../lib/di/tokens";
-import {IEmailProvider} from "../../../pkg/email/email.interface";
+import type {IEmailProvider} from "../../../pkg/email/email.interface";
 import {db} from "../../../lib/knex/kenx";
 
 import {activateMemberByUserId, findRestaurantMemberWithRole} from "../../rbac/repository/restaurant_member.repo";

@@ -64,13 +64,10 @@ export class InternalController {
      */
     reserveStock = async (req: Request, res: Response, next: NextFunction) => {
         try {
-            const branchId = Number(req.params.branchId);
-            if (!Number.isFinite(branchId) || branchId <= 0) {
-                throw new AppError("branchId path param must be a positive integer", 400);
-            }
-
-            const lines = parseStockLines(req.body?.items);
-            const result = await this.internalService.reserveStock(branchId, lines);
+            const result = await this.internalService.reserveStock(
+                branchIdParam(req),
+                parseStockLines(req.body?.items)
+            );
             sendSuccess(res, result);
         } catch (err) {
             next(err);
@@ -83,18 +80,23 @@ export class InternalController {
      */
     releaseStock = async (req: Request, res: Response, next: NextFunction) => {
         try {
-            const branchId = Number(req.params.branchId);
-            if (!Number.isFinite(branchId) || branchId <= 0) {
-                throw new AppError("branchId path param must be a positive integer", 400);
-            }
-
-            const lines = parseStockLines(req.body?.items);
-            const result = await this.internalService.releaseStock(branchId, lines);
+            const result = await this.internalService.releaseStock(
+                branchIdParam(req),
+                parseStockLines(req.body?.items)
+            );
             sendSuccess(res, result);
         } catch (err) {
             next(err);
         }
     }
+}
+
+function branchIdParam(req: Request): number {
+    const branchId = Number(req.params.branchId);
+    if (!Number.isFinite(branchId) || branchId <= 0) {
+        throw new AppError("branchId path param must be a positive integer", 400);
+    }
+    return branchId;
 }
 
 function parseStockLines(raw: unknown): ReserveStockLine[] {

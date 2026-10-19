@@ -1,0 +1,160 @@
+# Local stack for core-service: its own postgres (with PostGIS), redis and
+# rabbitmq, plus the API, the outbox worker and a one-shot migration job.
+#
+# Mailjet is the one dependency with no container - it is an external SaaS, so
+# MAILJET_* in .env must point at real credentials (or the sandbox) for the
+# password-reset flow to work. Everything else here is self-contained.
+#
+#   docker compose up -d --build
+#   docker compose logs -f core-service
+#
+# Interpolated values (${...}) come from ./.env, which Compose loads
+# automatically; the services themselves get the whole file via env_file.
+#
+# Published host ports deliberately default off the standard ones: order-service
+# runs its own postgres/redis/rabbitmq on 5432/6379/5672, and a developer
+# machine often has a native postgres or redis there too, so sharing the
+# defaults would make `up` fail on a port clash. Only the *host* side moves -
+# inside the network everything still talks on the standard ports, so no
+# application setting depends on this. Override any of them in .env
+# (PG_HOST_PORT, REDIS_HOST_PORT, RABBITMQ_HOST_PORT, RABBITMQ_UI_PORT).
+
+name: core-service
+
+services:
+  postgres:
+    # PostGIS, not plain postgres: restaurant_branches has a
+    # `geography(Point, 4326)` generated column.
+    image: postgis/postgis:18-3.6
+    container_name: core_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${DB_USER:-postgres}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?set DB_PASSWORD in core-service/.env}
+      # The entrypoint creates this database on first boot, and the postgis
+      # image's own init hook enables the postgis extension in it - so there is
+      # no init SQL of our own to maintain, and no database name hardcoded
+      # anywhere but .env.
+      POSTGRES_DB: ${DB_NAME:?set DB_NAME in core-service/.env}
+    ports:
+      - "${PG_HOST_PORT:-5433}:5432"
+    volumes:
+      # postgres 18+ wants a single mount here, not at .../data: it keeps the
+      # data in a major-version subdirectory so pg_upgrade --link can work.
+      - postgres_data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-postgres} -d ${DB_NAME}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: core_redis
+    restart: unless-stopped
+    ports:
+      - "${REDIS_HOST_PORT:-6380}:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    container_name: core_rabbitmq
+    restart: unless-stopped
+    ports:
+      - "${RABBITMQ_HOST_PORT:-5673}:5672"
+      # management UI, default http://localhost:15673 (guest/guest)
+      - "${RABBITMQ_UI_PORT:-15673}:15672"
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "status"]
+      interval: 10s
+      timeout: 10s
+      retries: 5
+
+  # One-shot: brings the schema up to date, then exits. core-service and
+  # core-worker wait for it to complete successfully.
+  migrate:
+    build:
+      context: .
+      target: migrator
+    image: core-service-migrator
+    env_file:
+      - .env
+    environment:
+      DB_HOST: postgres
+      DB_PORT: 5432
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  core-service:
+    build:
+      context: .
+      target: runner
+    image: core-service
+    container_name: core_api
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      DB_HOST: postgres
+      DB_PORT: 5432
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      RABBIT_URL: amqp://guest:guest@rabbitmq:5672
+    ports:
+      - "${API_HOST_PORT:-3000}:3000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+  # Drains the event_outbox table onto the rabbitmq exchange (src/worker.ts).
+  core-worker:
+    build:
+      context: .
+      target: runner
+    image: core-service
+    container_name: core_worker
+    restart: unless-stopped
+    command: ["node", "dist/worker.js"]
+    # The image's HEALTHCHECK probes /api/health; the worker serves no HTTP, so
+    # inheriting it would just mark the container permanently unhealthy.
+    healthcheck:
+      disable: true
+      test: ["CMD", "true"]
+    env_file:
+      - .env
+    environment:
+      DB_HOST: postgres
+      DB_PORT: 5432
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      RABBIT_URL: amqp://guest:guest@rabbitmq:5672
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+volumes:
+  postgres_data:
+  redis_data:
+  rabbitmq_data:

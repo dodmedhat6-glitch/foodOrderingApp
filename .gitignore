@@ -18,3 +18,9 @@ coverage/
 .idea/
 
 /core-service/.mcp.json
+
+#test
+.env.test
+
+# Nested standalone repo - has its own git history
+MCPServer/

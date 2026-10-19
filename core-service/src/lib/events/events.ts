@@ -49,3 +49,62 @@ export function buildInvalidationPayload(id: number, occurredAt: Date = new Date
 export function invalidationEventType(entityType: InvalidatedEntityType): string {
     return `core.${entityType}.invalidated`;
 }
+
+/**
+ * Richer payloads for the two entities order-service keeps a *projection* of
+ * rather than just a cached read.
+ *
+ * The base `{ id, occurredAt }` only lets a consumer delete its copy. Where
+ * the writing transaction already holds the new values, we ship them: the
+ * consumer can then patch its projection in place instead of dropping it and
+ * paying an HTTP round trip on the next order placement. Both are additive
+ * supersets of `InvalidationPayload`, so a consumer that ignores the extra
+ * fields keeps working exactly as before — order-service's handlers fall back
+ * to a delete whenever a field it needs is absent.
+ *
+ * Only facts the transaction actually wrote go in here. A guess would be worse
+ * than no field at all, because the consumer would cache it.
+ */
+export interface BranchInvalidationPayload extends InvalidationPayload {
+    isActive?: boolean;
+    acceptOrders?: boolean;
+}
+
+/**
+ * `branchId` is what makes the rest usable: order-service keys its product
+ * projection per branch+product, so a payload without it can only be handled
+ * as a delete across every branch.
+ */
+export interface ProductInvalidationPayload extends InvalidationPayload {
+    branchId?: number;
+    unitPriceMinor?: number;
+    stock?: number;
+    isAvailable?: boolean;
+}
+
+export function buildBranchInvalidationPayload(
+    id: number,
+    fields: Omit<BranchInvalidationPayload, "id" | "occurredAt"> = {},
+    occurredAt: Date = new Date()
+): BranchInvalidationPayload {
+    return { ...buildInvalidationPayload(id, occurredAt), ...definedOnly(fields) };
+}
+
+export function buildProductInvalidationPayload(
+    id: number,
+    fields: Omit<ProductInvalidationPayload, "id" | "occurredAt"> = {},
+    occurredAt: Date = new Date()
+): ProductInvalidationPayload {
+    return { ...buildInvalidationPayload(id, occurredAt), ...definedOnly(fields) };
+}
+
+/**
+ * Drops keys whose value is undefined. The payload is persisted as JSON, where
+ * `{"stock": undefined}` and a missing `stock` serialise the same — but an
+ * explicit `null` would not, and the consumer treats "present" as "trustworthy".
+ */
+function definedOnly<T extends object>(fields: T): Partial<T> {
+    return Object.fromEntries(
+        Object.entries(fields).filter(([, value]) => value !== undefined)
+    ) as Partial<T>;
+}

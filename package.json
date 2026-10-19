@@ -1,0 +1,19 @@
+{
+  "name": "food-ordering-app",
+  "private": true,
+  "scripts": {
+    "dev": "concurrently -n core,order -c cyan,magenta \"npm:dev:core\" \"npm:dev:order\"",
+    "dev:core": "npm --prefix core-service run dev",
+    "dev:order": "npm --prefix order-service run dev",
+    "dev:all": "concurrently -n core,core-wk,order,order-wk -c cyan,blue,magenta,yellow \"npm:dev:core\" \"npm:dev:core:worker\" \"npm:dev:order\" \"npm:dev:order:worker\"",
+    "dev:core:worker": "npm --prefix core-service run worker:dev",
+    "dev:order:worker": "npm --prefix order-service run dev:worker",
+    "knex": "npm --prefix core-service run knex --"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2"
+  },
+  "dependencies": {
+    "@types/uuid": "^10.0.0"
+  }
+}

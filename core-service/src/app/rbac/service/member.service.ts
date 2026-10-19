@@ -115,8 +115,6 @@ export  class MemberService{
 
     }
 
-    //TODO : PUT RESTAURANT MEMBER BRANCHES SERVICE
-
     async listMember(restaurantId : number) {
         const list = await findMembersByRestaurantId(restaurantId);
         return {data : list};

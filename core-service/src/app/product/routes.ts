@@ -8,6 +8,8 @@ import {rbac, requireBranchAccess, requireRestaurantMember} from "../../lib/auth
 export const productRouter = Router();
 const productController = container.resolve<ProductController>(tokens.ProductController);
 
+// public storefront surface - intentionally unauthenticated, readable by branch/product id alone.
+// branchId is globally unique, so the branch determines its restaurant and these results are single-restaurant by construction.
 productRouter.get('/restaurants/:restaurantId/categories', productController.findCategories);
 productRouter.get('/branches/:branchId/products', productController.findByBranch);
 productRouter.get('/products/:id', productController.findById);

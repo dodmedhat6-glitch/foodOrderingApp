@@ -7,6 +7,24 @@ import { SystemRole } from '../../user/enums'
 import {type} from "node:os";
 import {Type} from "class-transformer";
 
+export class RegisterRestaurantDto {
+
+
+    @MinLength(1)
+    @IsString()
+    name!: string;
+
+    @IsOptional()
+    @IsString()
+    logoURL?:string;
+
+    @IsString()
+    @MinLength(1)
+    primaryCountry?:string;
+
+}
+
+
 export class RegisterDto {
     @IsEmail()
     email!: string;
@@ -72,27 +90,4 @@ export class ResetPasswordDto {
     )
     newPassword!: string;
 }
-
-
-export class RegisterRestaurantDto {
-
-
-    @MinLength(1)
-    @IsString()
-    name!: string;
-
-    @IsOptional()
-    @IsString()
-    logoURL?:string;
-
-    @IsString()
-    @MinLength(1)
-    primaryCountry?:string;
-
-}
-
-
-
-
-
 

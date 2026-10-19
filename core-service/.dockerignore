@@ -1,0 +1,30 @@
+# The build context. `COPY . .` in the builder stage would otherwise pull the
+# whole directory in, so anything not needed to run `tsc` (or the integration
+# suite, which the `test` target builds from the same context) is excluded.
+# Most important: .env must never enter the context - it would be readable in
+# the builder image layer even though the runtime stage only copies dist/.
+
+.env
+.env.*
+*.log
+
+node_modules
+dist
+coverage
+
+.git
+.gitignore
+.github
+.idea
+.vscode
+.claude
+.mcp.json
+
+docs
+*.md
+todo.txt
+
+Dockerfile
+.dockerignore
+docker-compose.yml
+docker-compose.test.yml
