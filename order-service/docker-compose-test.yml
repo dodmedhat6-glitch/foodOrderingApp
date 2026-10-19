@@ -1,0 +1,214 @@
+# Throwaway stack for verification runs and CI.
+#
+# Three things make it different from docker-compose.yml, and all three are the
+# point:
+#
+#   1. It reads no `.env`. Every variable the zod schema in lib/config/env.ts
+#      requires is supplied inline, so this file runs on a machine that has
+#      never been set up — a CI runner, or a clean clone. Anything you may
+#      legitimately want to point elsewhere (core-service, Kashier) is written
+#      `${VAR:-default}` and can be overridden from the shell.
+#   2. Storage is tmpfs. Postgres and RabbitMQ start empty every single time,
+#      so the init SQL and the migrations always run and a test can never pass
+#      because of a row an earlier run left behind.
+#   3. Host ports are shifted out of the way, so it can run alongside the dev
+#      stack and the dev stack's data is never at risk. They sit below the
+#      ephemeral range on purpose: Windows reserves blocks up there for Hyper-V
+#      (`netsh int ipv4 show excludedportrange protocol=tcp`), and a reserved
+#      one fails to bind with a permissions error that reads like a bug.
+#
+#   docker compose -f docker-compose-test.yml up --build -d
+#   docker compose -f docker-compose-test.yml logs -f order-service
+#   docker compose -f docker-compose-test.yml down -v
+#
+# Infrastructure only — for driving play/*.ts from the host against throwaway
+# databases — is the same command with an explicit service list:
+#
+#   docker compose -f docker-compose-test.yml up -d postgres redis rabbitmq migrate
+#
+# Note that the host-side scripts read `.env`, and dotenv does not overwrite a
+# variable that is already in the environment: export the shifted ports
+# (DB_eg_PORT=15432, REDIS_PORT=16379, ...) in the shell that runs them.
+name: quickbite-order-service-test
+
+x-test-env: &test-env
+    NODE_ENV: test
+    PORT: "3001"
+
+    # Test-only. The point of a fixed value is that a token minted by one run
+    # verifies in the next; it must match core-service's secrets for any
+    # cross-service test to work.
+    ACCESS_SECRET: ${ACCESS_SECRET:-test-access-secret}
+    REFRESH_SECRET: ${REFRESH_SECRET:-test-refresh-secret}
+    CORS_ORIGINS: http://localhost:3000
+
+    REGIONS: eg,sa
+    DB_POOL_MAX: "5"
+    # No src/ and no tsx in the image — migrations are the compiled copies.
+    DB_MIGRATION_DIRECTORY: dist/migrations
+    DB_MIGRATION_EXTENSION: js
+
+    DB_eg_HOST: postgres
+    DB_eg_PORT: "5432"
+    DB_eg_USERNAME: postgres
+    DB_eg_PASSWORD: test
+    DB_eg_NAME: order_service_eg
+    ARCHIVE_DB_eg_HOST: postgres
+    ARCHIVE_DB_eg_PORT: "5432"
+    ARCHIVE_DB_eg_USERNAME: postgres
+    ARCHIVE_DB_eg_PASSWORD: test
+    ARCHIVE_DB_eg_NAME: order_service_eg_archive
+
+    DB_sa_HOST: postgres
+    DB_sa_PORT: "5432"
+    DB_sa_USERNAME: postgres
+    DB_sa_PASSWORD: test
+    DB_sa_NAME: order_service_sa
+    ARCHIVE_DB_sa_HOST: postgres
+    ARCHIVE_DB_sa_PORT: "5432"
+    ARCHIVE_DB_sa_USERNAME: postgres
+    ARCHIVE_DB_sa_PASSWORD: test
+    ARCHIVE_DB_sa_NAME: order_service_sa_archive
+
+    REDIS_HOST: redis
+    REDIS_PORT: "6379"
+    # Deliberately empty: the test Redis runs without `requirepass`, and the
+    # cache provider only sends AUTH when this is non-empty.
+    REDIS_PASSWORD: ""
+
+    RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672
+    RABBITMQ_CORE_EVENTS_EXCHANGE: core.events
+    RABBITMQ_CORE_EVENTS_QUEUE: order-service.core-events
+    RABBITMQ_CORE_EVENTS_BINDINGS: "core.#"
+    RABBITMQ_ORDER_EVENTS_EXCHANGE: order.events
+
+    # host.docker.internal reaches a core-service running on the host, which is
+    # how the cross-service play scripts are driven locally. In CI, point it at
+    # a mock or at a core container.
+    CORE_SERVICE_BASE_URL: ${CORE_SERVICE_BASE_URL:-http://host.docker.internal:3000}
+    CORE_INTERNAL_API_KEY: ${CORE_INTERNAL_API_KEY:-test-internal-api-key}
+
+    # Nothing here can reach Kashier on its own. The session-creation tests need
+    # real test credentials passed in from the shell; the signature tests do not
+    # — that HMAC is verified against KASHIER_API_KEY locally, with no network.
+    KASHIER_BASE_URL: ${KASHIER_BASE_URL:-https://test-api.kashier.io}
+    KASHIER_MERCHANT_ID: ${KASHIER_MERCHANT_ID:-MID-0000-000}
+    KASHIER_API_KEY: ${KASHIER_API_KEY:-test-payment-api-key}
+    KASHIER_SECRET_KEY: ${KASHIER_SECRET_KEY:-test-secret-key}
+    KASHIER_RETURN_URL: ${KASHIER_RETURN_URL:-http://localhost:3000/checkout/return}
+
+    # Sweeps and drains run fast here: a test should not sit through a
+    # production cadence to watch a timer fire.
+    OUTBOUND_EVENTS_DRAIN_TICK_SEC: "1"
+    PAYMENT_EXPIRY_SWEEP_INTERVAL_SEC: "5"
+    PAYMENT_SESSION_TIMEOUT_MIN: "1"
+    ASSIGNMENT_SWEEP_SEC: "5"
+    ASSIGNMENT_OFFER_TTL_SEC: "10"
+    PRESENCE_SWEEP_SEC: "10"
+    PRESENCE_STALE_SEC: "30"
+    RESTAURANT_ORDERS_CACHE_TTL_SEC: "2"
+    # The archival window is hour-based and a test cannot wait for 02:00, so it
+    # is opened all day. The worker still only moves prior-year rows.
+    ARCHIVAL_INTERVAL_SEC: "60"
+    ARCHIVAL_WINDOW_START_HOUR: "0"
+    ARCHIVAL_WINDOW_END_HOUR: "24"
+    IDEMPOTENCY_PURGE_INTERVAL_SEC: "60"
+
+x-test-service: &test-service
+    build: .
+    image: quickbite/order-service:test
+    environment: *test-env
+    restart: "no"
+    extra_hosts:
+        # Linux docker has no host.docker.internal by default, and
+        # CORE_SERVICE_BASE_URL above relies on it resolving.
+        - "host.docker.internal:host-gateway"
+
+x-infra-ready: &infra-ready
+    postgres:
+        condition: service_healthy
+    redis:
+        condition: service_healthy
+    rabbitmq:
+        condition: service_healthy
+
+services:
+    postgres:
+        image: postgres:18
+        environment:
+            POSTGRES_USER: postgres
+            POSTGRES_PASSWORD: test
+            POSTGRES_DB: postgres
+        ports:
+            - "15432:5432"
+        tmpfs:
+            # postgres:18 keeps PGDATA under /var/lib/postgresql/18. In RAM: the
+            # cluster is gone with the container, which is what makes every run
+            # re-run the init SQL and the migrations.
+            - /var/lib/postgresql
+        volumes:
+            - ./scripts/docker/01.init.sql:/docker-entrypoint-initdb.d/01.init.sql:ro
+        # fsync off is safe here and only here — the data is disposable by
+        # design, and this is most of the wall-clock cost of a migration run.
+        command: ["postgres", "-c", "fsync=off", "-c", "full_page_writes=off", "-c", "synchronous_commit=off"]
+        healthcheck:
+            test: ["CMD-SHELL", "pg_isready -U postgres"]
+            interval: 2s
+            timeout: 3s
+            retries: 30
+
+    redis:
+        image: redis:7-alpine
+        ports:
+            - "16379:6379"
+        # No persistence and no password — see REDIS_PASSWORD above.
+        command: ["redis-server", "--save", "", "--appendonly", "no"]
+        healthcheck:
+            test: ["CMD", "redis-cli", "ping"]
+            interval: 2s
+            timeout: 3s
+            retries: 30
+
+    rabbitmq:
+        image: rabbitmq:3.13-management-alpine
+        ports:
+            - "15673:5672"
+            - "16672:15672"
+        tmpfs:
+            - /var/lib/rabbitmq
+        healthcheck:
+            # `check_running` waits for the node to accept connections; `status`
+            # returns before the AMQP listener is up.
+            test: ["CMD", "rabbitmq-diagnostics", "-q", "check_running"]
+            interval: 3s
+            timeout: 10s
+            retries: 30
+
+    # One-shot, and the gate the two long-lived services wait on: the init SQL
+    # creates the four databases, nothing else creates the tables.
+    migrate:
+        <<: *test-service
+        command: ["node", "dist/migrate.js", "--cluster=all"]
+        depends_on:
+            postgres:
+                condition: service_healthy
+
+    order-service:
+        <<: *test-service
+        ports:
+            - "3101:3001"
+        depends_on:
+            <<: *infra-ready
+            migrate:
+                condition: service_completed_successfully
+
+    order-worker:
+        <<: *test-service
+        command: ["node", "dist/worker.js"]
+        # The image's HEALTHCHECK probes /api/health; the worker serves no HTTP.
+        healthcheck:
+            disable: true
+        depends_on:
+            <<: *infra-ready
+            migrate:
+                condition: service_completed_successfully

@@ -32,7 +32,7 @@ It does **not** own: users, restaurants, branches, products, RBAC permission cat
 | DB driver            | `knex` over `pg`                                 |
 | Cache                | `ioredis` via `RedisCacheProvider`               |
 | Auth                 | `jsonwebtoken` (access in cookie; same JWT shape as core) |
-| Password hashing     | `bcrypt`                                         |
+| Password hashing     | none — credentials live in `core-service`         |
 | Email                | `node-mailjet` (only if needed — most notifications are WS) |
 | WebSocket            | `socket.io` + `@socket.io/redis-adapter` for cross-worker fan-out |
 | Messaging            | **RabbitMQ** via `amqplib` (core → order async)  |

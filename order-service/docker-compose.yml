@@ -1,81 +1,154 @@
+# Local stack: Postgres (all four shard databases in one cluster), Redis,
+# RabbitMQ, the API, the worker, and a one-shot migrate job the two long-lived
+# services wait on.
+#
+# Configuration comes from `.env` — the same file `npm run dev` reads — with
+# only the things that differ inside the network overridden below. For a
+# self-contained stack that needs no `.env` at all (CI), see
+# docker-compose-test.yml.
+name: quickbite-order-service
+
+# Everything the service processes need in order to find their infrastructure
+# at container hostnames instead of localhost. `environment` beats `env_file`,
+# which is the whole point: .env holds the developer-machine values.
+x-service-env: &service-env
+    DB_eg_HOST: postgres
+    DB_eg_PORT: "5432"
+    ARCHIVE_DB_eg_HOST: postgres
+    ARCHIVE_DB_eg_PORT: "5432"
+    DB_sa_HOST: postgres
+    DB_sa_PORT: "5432"
+    ARCHIVE_DB_sa_HOST: postgres
+    ARCHIVE_DB_sa_PORT: "5432"
+    REDIS_HOST: redis
+    REDIS_PORT: "6379"
+    RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672
+    # No src/ and no tsx in the image — migrations are the compiled copies.
+    # Repeated here because an `env_file` entry would otherwise override the
+    # Dockerfile's ENV with the dev defaults.
+    DB_MIGRATION_DIRECTORY: dist/migrations
+    DB_MIGRATION_EXTENSION: js
+
+x-service: &service
+    build: .
+    # Named so the api, worker and migrate services share one build instead of
+    # producing three identical images.
+    image: quickbite/order-service:local
+    env_file:
+        - .env
+    environment: *service-env
+
+x-infra-ready: &infra-ready
+    postgres:
+        condition: service_healthy
+    redis:
+        condition: service_healthy
+    rabbitmq:
+        condition: service_healthy
+
 services:
-  postgres:
-    image: postgres:18
-    container_name: quickbite_postgres
-    restart: unless-stopped
-    environment:
-        POSTGRES_USER: postgres
-        POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
-        POSTGRES_DB: postgres
-    ports:
-        - "5432:5432"
-    volumes:
-      - postgres_data:/var/lib/postgresql
-      - ./scripts/docker/01.init.sql:/docker-entrypoint-initdb.d/01.init.sql:ro
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres"]
-      interval: 10s
-      retries: 5
-  redis:
-    image: redis:7-alpine
-    ports:
-      - "6379:6379"
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 10s
-      retries: 5
+    postgres:
+        image: postgres:18
+        container_name: quickbite_postgres
+        restart: unless-stopped
+        environment:
+            POSTGRES_USER: postgres
+            # The superuser password IS the password the app connects with —
+            # every shard database in this stack lives in this one cluster
+            # under this one role. Taking it from DB_eg_PASSWORD keeps the two
+            # from drifting; `:?` fails the stack fast instead of letting the
+            # postgres entrypoint abort on an empty password.
+            POSTGRES_PASSWORD: ${DB_eg_PASSWORD:?DB_eg_PASSWORD must be set in .env}
+            POSTGRES_DB: postgres
+        ports:
+            - "5432:5432"
+        volumes:
+            # postgres:18 moved PGDATA under /var/lib/postgresql/18 and declares
+            # the volume one level up, so this is the directory to persist.
+            - postgres_data:/var/lib/postgresql
+            # Runs once, on an empty data directory only: creates the four
+            # databases (hot + archive per region).
+            - ./scripts/docker/01.init.sql:/docker-entrypoint-initdb.d/01.init.sql:ro
+        healthcheck:
+            test: ["CMD-SHELL", "pg_isready -U postgres"]
+            interval: 10s
+            timeout: 5s
+            retries: 5
 
-  rabbitmq:
-    image: rabbitmq:3.10-management-alpine
-    volumes:
-      - rabbitmq_data:/var/lib/rabbitmq
-    ports:
-      - "5672:5672"
-      - "15672:15672"
-    healthcheck:
-      test: ["CMD", "rabbitmq-diagnostics","-q","status"]
-      interval: 10s
-      retries: 5
+    redis:
+        image: redis:7-alpine
+        container_name: quickbite_redis
+        restart: unless-stopped
+        # The app sends AUTH whenever REDIS_PASSWORD is non-empty, and a Redis
+        # with no `requirepass` rejects it ("Client sent AUTH, but no password
+        # is set"). Starting the server with the same value keeps the two ends
+        # in agreement; an empty REDIS_PASSWORD leaves the server open, which
+        # is what the app then expects.
+        command: ["sh", "-c", 'exec redis-server ${REDIS_PASSWORD:+--requirepass "$$REDIS_PASSWORD"}']
+        environment:
+            REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+        ports:
+            - "6379:6379"
+        healthcheck:
+            test: ["CMD-SHELL", 'redis-cli ${REDIS_PASSWORD:+-a "$$REDIS_PASSWORD"} ping | grep -q PONG']
+            interval: 10s
+            timeout: 5s
+            retries: 5
 
-  order-service:
-    build: .
-    env_file:
-      - .env
-    environment:
-      DB_eg_HOST: postgres
-      DB_sa_HOST: postgres
-      ARCHIVE_DB_eg_HOST: postgres
-      ARCHIVE_DB_sa_HOST: postgres
-      REDIS_HOST: redis
-      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
-    ports:
-      - "3001:3001"
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-      rabbitmq:
-        condition: service_healthy
-  order-worker:
-    build: .
-    command: ["node", "dist/worker.js"]
-    env_file:
-      - .env
-    environment:
-      DB_eg_HOST: postgres
-      DB_sa_HOST: postgres
-      ARCHIVE_DB_eg_HOST: postgres
-      ARCHIVE_DB_sa_HOST: postgres
-      REDIS_HOST: redis
-      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-      rabbitmq:
-        condition: service_healthy
+    rabbitmq:
+        # 3.13 is the last 3.x; 3.10 is long out of support. The protocol this
+        # service speaks is identical on both.
+        image: rabbitmq:3.13-management-alpine
+        container_name: quickbite_rabbitmq
+        restart: unless-stopped
+        volumes:
+            - rabbitmq_data:/var/lib/rabbitmq
+        ports:
+            - "5672:5672"
+            - "15672:15672"
+        healthcheck:
+            # `check_running` waits for the node to actually accept connections;
+            # `status` returns before the AMQP listener is up.
+            test: ["CMD", "rabbitmq-diagnostics", "-q", "check_running"]
+            interval: 10s
+            timeout: 10s
+            retries: 10
+
+    # One-shot. Without it the API comes up against empty databases: the init
+    # SQL creates the databases, nothing creates the tables.
+    migrate:
+        <<: *service
+        container_name: quickbite_order_migrate
+        command: ["node", "dist/migrate.js", "--cluster=all"]
+        restart: "no"
+        depends_on:
+            postgres:
+                condition: service_healthy
+
+    order-service:
+        <<: *service
+        container_name: quickbite_order_service
+        restart: unless-stopped
+        ports:
+            - "3001:3001"
+        depends_on:
+            <<: *infra-ready
+            migrate:
+                condition: service_completed_successfully
+
+    order-worker:
+        <<: *service
+        container_name: quickbite_order_worker
+        restart: unless-stopped
+        command: ["node", "dist/worker.js"]
+        # The image's HEALTHCHECK probes /api/health; the worker serves no HTTP.
+        healthcheck:
+            disable: true
+        depends_on:
+            <<: *infra-ready
+            migrate:
+                condition: service_completed_successfully
+
 volumes:
     postgres_data:
     rabbitmq_data:
