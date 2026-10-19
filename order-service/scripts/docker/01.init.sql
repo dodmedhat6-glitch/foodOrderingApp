@@ -1,0 +1,4 @@
+CREATE DATABASE order_service_eg;
+CREATE DATABASE order_service_eg_archive;
+CREATE DATABASE order_service_sa;
+CREATE DATABASE order_service_sa_archive;
