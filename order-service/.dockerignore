@@ -1,7 +1,10 @@
-# The build context. `COPY . .` in the builder stage would otherwise pull the
-# whole directory in, so anything not needed to run `tsc` is excluded here.
-# Most important: .env must never enter the context — it would be readable in
-# the builder image layer even though the runtime stage only copies dist/.
+# The build context. The builder stage copies only package*.json, tsconfig.json
+# and src/, so most of this is belt-and-braces — but the context is still
+# uploaded to the daemon in full before any COPY runs, and every file in it is a
+# file that can bust the cache. Keeping it tight keeps `docker build` fast.
+#
+# Most important: .env must never enter the context. A secret is readable in an
+# intermediate layer forever, even when the runtime stage only copies dist/.
 
 .env
 .env.*
@@ -9,9 +12,12 @@
 
 node_modules
 dist
+*.tsbuildinfo
 
 .git
 .gitignore
+.gitattributes
+.github
 .idea
 .vscode
 .claude
@@ -20,9 +26,18 @@ dist
 # local experimentation scripts, never part of a build
 play/
 
+# operational scripts run with tsx on a developer machine; the compiled
+# entrypoints the image needs (server, worker, migrate) are all under src/
+scripts/
+
 docs
 *.md
+*.png
 
 Dockerfile
 .dockerignore
 docker-compose.yml
+docker-compose-test.yml
+
+# typechecks scripts/ — not part of `npm run build`
+tsconfig.scripts.json
