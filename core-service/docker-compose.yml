@@ -10,6 +10,14 @@
 #
 # Interpolated values (${...}) come from ./.env, which Compose loads
 # automatically; the services themselves get the whole file via env_file.
+#
+# Published host ports deliberately default off the standard ones: order-service
+# runs its own postgres/redis/rabbitmq on 5432/6379/5672, and a developer
+# machine often has a native postgres or redis there too, so sharing the
+# defaults would make `up` fail on a port clash. Only the *host* side moves -
+# inside the network everything still talks on the standard ports, so no
+# application setting depends on this. Override any of them in .env
+# (PG_HOST_PORT, REDIS_HOST_PORT, RABBITMQ_HOST_PORT, RABBITMQ_UI_PORT).
 
 name: core-service
 
@@ -29,7 +37,7 @@ services:
       # anywhere but .env.
       POSTGRES_DB: ${DB_NAME:?set DB_NAME in core-service/.env}
     ports:
-      - "${DB_PORT:-5432}:5432"
+      - "${PG_HOST_PORT:-5433}:5432"
     volumes:
       # postgres 18+ wants a single mount here, not at .../data: it keeps the
       # data in a major-version subdirectory so pg_upgrade --link can work.
@@ -45,7 +53,7 @@ services:
     container_name: core_redis
     restart: unless-stopped
     ports:
-      - "${REDIS_PORT:-6379}:6379"
+      - "${REDIS_HOST_PORT:-6380}:6379"
     volumes:
       - redis_data:/data
     healthcheck:
@@ -59,9 +67,9 @@ services:
     container_name: core_rabbitmq
     restart: unless-stopped
     ports:
-      - "5672:5672"
-      # management UI: http://localhost:15672 (guest/guest)
-      - "15672:15672"
+      - "${RABBITMQ_HOST_PORT:-5673}:5672"
+      # management UI, default http://localhost:15673 (guest/guest)
+      - "${RABBITMQ_UI_PORT:-15673}:15672"
     volumes:
       - rabbitmq_data:/var/lib/rabbitmq
     healthcheck:
@@ -103,7 +111,7 @@ services:
       REDIS_PORT: 6379
       RABBIT_URL: amqp://guest:guest@rabbitmq:5672
     ports:
-      - "${PORT:-3000}:3000"
+      - "${API_HOST_PORT:-3000}:3000"
     depends_on:
       postgres:
         condition: service_healthy
@@ -123,6 +131,11 @@ services:
     container_name: core_worker
     restart: unless-stopped
     command: ["node", "dist/worker.js"]
+    # The image's HEALTHCHECK probes /api/health; the worker serves no HTTP, so
+    # inheriting it would just mark the container permanently unhealthy.
+    healthcheck:
+      disable: true
+      test: ["CMD", "true"]
     env_file:
       - .env
     environment:
