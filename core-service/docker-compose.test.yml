@@ -1,0 +1,103 @@
+# Throwaway stack for the Jest integration suite (npm run test:integration).
+#
+#   docker compose -f docker-compose.test.yml up --build \
+#       --abort-on-container-exit --exit-code-from tests
+#   docker compose -f docker-compose.test.yml down -v
+#
+# Deliberately isolated from docker-compose.yml: its own project name, no
+# published ports (nothing here needs reaching from the host, and leaving them
+# off means a running dev stack is no obstacle) and postgres on tmpfs, so each
+# run starts from an empty database and leaves nothing behind.
+#
+# .dockerignore keeps .env.test out of the image, so tests/setup.env.ts finds
+# no file to load and every variable is supplied below instead. The values
+# mirror .env.test; only the hosts differ.
+
+name: core-service-test
+
+services:
+  postgres-test:
+    image: postgis/postgis:18-3.6
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: test
+      # Matches DB_NAME on the `tests` service. The entrypoint quotes the name
+      # when it creates the database, so the dot is not a problem, and the
+      # postgis image's own init hook enables the extension inside it.
+      POSTGRES_DB: DODS.test
+    # No volume, and the mount point is /var/lib/postgresql rather than
+    # .../data because that is where postgres 18+ expects it. On tmpfs the
+    # database is memory-backed and dies with the container, so every run
+    # starts from an empty schema.
+    tmpfs:
+      - /var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d 'DODS.test'"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis-test:
+    image: redis:7-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  rabbitmq-test:
+    image: rabbitmq:3.13-alpine
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "status"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+
+  tests:
+    build:
+      context: .
+      target: test
+    image: core-service-test
+    environment:
+      NODE_ENV: test
+      PORT: "3001"
+
+      DB_HOST: postgres-test
+      DB_PORT: "5432"
+      DB_USER: postgres
+      DB_PASSWORD: test
+      DB_NAME: DODS.test
+      DB_POOL_MAX: "5"
+      DB_MIGRATIONS_DIRECTORY: src/migrations
+      DB_MIGRATIONS_EXTENSION: ts
+
+      ACCESS_SECRET: test-access-secret
+      REFRESH_SECRET: test-refresh-secret
+      ACCESS_EXPIRATION: "3600"
+      REFRESH_EXPIRATION: "86400"
+
+      CORS_ORIGIN: http://localhost:3000
+
+      REDIS_HOST: redis-test
+      REDIS_PORT: "6379"
+
+      RABBIT_URL: amqp://guest:guest@rabbitmq-test:5672
+      RABBIT_EXCHANGE: core.events
+      RABBIT_BATCH_SIZE: "50"
+
+      MAILJET_API_KEY: test
+      MAILJET_SECRET_KEY: test
+      MAILJET_FROM_EMAIL: test@example.com
+      MAILJET_FROM_NAME: Test
+
+      ORDER_SERVICE_API_KEY: test-order-service-api-key
+    depends_on:
+      postgres-test:
+        condition: service_healthy
+      redis-test:
+        condition: service_healthy
+      rabbitmq-test:
+        condition: service_healthy
+
+    command: sh -e -c "npm ci && npm run build && npm test && npm run test:integration"
