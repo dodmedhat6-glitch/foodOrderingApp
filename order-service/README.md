@@ -1,4 +1,25 @@
-# order-service
+<div align="center">
+
+# 🛒 order-service
+
+**Orders, payments, dispatch and finance for the QuickBite platform**
+
+[![Order Service CI](https://github.com/dodmedhat6-glitch/foodOrderingApp/actions/workflows/order-service-ci.yml/badge.svg)](https://github.com/dodmedhat6-glitch/foodOrderingApp/actions/workflows/order-service-ci.yml)
+![TypeScript](https://img.shields.io/badge/TypeScript-3178C6?logo=typescript&logoColor=white)
+![Express](https://img.shields.io/badge/Express-5-000000?logo=express&logoColor=white)
+![PostgreSQL](https://img.shields.io/badge/PostgreSQL-sharded_+_partitioned-4169E1?logo=postgresql&logoColor=white)
+![socket.io](https://img.shields.io/badge/socket.io-realtime-010101?logo=socketdotio&logoColor=white)
+![Docker](https://img.shields.io/badge/Docker-ready-2496ED?logo=docker&logoColor=white)
+
+[← Platform overview](../README.md) ·
+[Getting started](#-getting-started) ·
+[Docker](#-docker) ·
+[CI](#-continuous-integration) ·
+[Full docs](docs/README.md)
+
+</div>
+
+---
 
 Everything that happens after a customer picks their food: **orders, payments,
 delivery dispatch, delivery agents, restaurant finance and archival** of old
@@ -6,9 +27,8 @@ data. Users, restaurants, branches, products and permissions live in
 [`core-service`](../core-service/); this service reads them from there.
 
 **Stack:** Node.js · TypeScript · Express 5 · PostgreSQL (sharded + partitioned)
-· Knex · Redis · RabbitMQ · socket.io · Kashier payments · tsyringe · zod
-
-[← Back to the platform overview](../README.md) · Full docs: [`docs/`](docs/README.md)
+· Knex · Redis · RabbitMQ · socket.io · Kashier payments · tsyringe · zod ·
+Docker · GitHub Actions
 
 ## What it does
 
@@ -90,7 +110,11 @@ Who may move which edge, and the side effects of each transition (refunds,
 stock release, dispatch, settlement), are in
 [`docs/business-logic/orders.md`](docs/business-logic/orders.md).
 
-## Getting Started
+## 🚀 Getting Started
+
+The quickest route is [Docker](#-docker): one command gives you Postgres with
+all four shard databases, Redis, RabbitMQ, the migrations, the API and the
+worker. To run it natively:
 
 ### Prerequisites
 
@@ -115,25 +139,6 @@ npm run dev                                        # API (HTTP /api + WebSocket 
 npm run dev:worker                                 # background jobs (separate terminal)
 ```
 
-### Or in Docker
-
-```bash
-docker compose up --build -d      # Postgres + Redis + RabbitMQ + migrate + API + worker
-docker compose logs -f order-service
-```
-
-`docker-compose.yml` reads the same `.env` and overrides only the hosts, the
-ports and the migration paths (the image has no `src/` and no `tsx`, so
-migrations run from `dist/`). `POSTGRES_PASSWORD` is taken from
-`DB_eg_PASSWORD`: every shard database in the stack lives in one cluster under
-one role, and two values would only drift. The one-shot `migrate` service
-applies the schema to all four databases before the API and worker start.
-
-For a throwaway stack that reads no `.env` at all — tmpfs storage, fresh
-databases every run, host ports shifted so it can sit next to the one above —
-use `docker-compose-test.yml`; its header documents the CI and host-driven
-variants.
-
 ### Scripts
 
 | Script | Description |
@@ -143,6 +148,91 @@ variants.
 | `npm run typecheck` | Type-check app and scripts |
 | `npm run migrate:all` | Migrate every region's shard |
 | `npm run archive:now` | Run archival immediately (ignores the night window) |
+
+## 🐳 Docker
+
+A three-stage [`Dockerfile`](Dockerfile) on `node:22-alpine`:
+
+```mermaid
+flowchart LR
+    prod["prod-deps<br/>npm ci --omit=dev"] --> runtime
+    builder["builder<br/>npm ci · tsc → dist/"] --> runtime["runtime<br/>dist/ + prod deps<br/>non-root · HEALTHCHECK"]
+```
+
+- `npm ci` runs **twice** — with dev deps to build, without them to ship —
+  instead of `npm prune`, so nothing removed lingers in a layer.
+- No build toolchain: every production dependency is pure JS or ships a musl
+  prebuild.
+- The **same image** runs the API (`dist/server.js`), the worker
+  (`dist/worker.js`) and the migrations (`dist/migrate.js`). Migrations run from
+  the compiled `dist/migrations`, since the image has no `src/` and no `tsx`.
+- Runs as the unprivileged `node` user. The healthcheck hits `/api/health`,
+  which answers `503` when any shard is unreachable — unhealthy means "cannot
+  serve", not just "process is alive".
+
+### Development stack — `docker-compose.yml`
+
+```bash
+cp .env.example .env              # DB_eg_PASSWORD is required
+docker compose up -d --build
+docker compose logs -f order-service
+curl http://localhost:3001/api/health
+```
+
+| Service | What it is | Host port |
+| --- | --- | --- |
+| `postgres` | `postgres:18` — an init script creates all **four shard databases** (hot + archive for `eg` and `sa`) in one cluster | `5432` |
+| `redis` | `redis:7-alpine`, `requirepass` set from `REDIS_PASSWORD` when it is non-empty | `6379` |
+| `rabbitmq` | `rabbitmq:3.13-management-alpine` (UI at http://localhost:15672) | `5672`, `15672` |
+| `migrate` | One-shot `node dist/migrate.js --cluster=all` — every region, hot and archive | — |
+| `order-service` | API (HTTP `/api` + WebSocket) | `3001` |
+| `order-worker` | Background jobs + outbox drain | — |
+
+It reads the same `.env` as `npm run dev` and overrides only what differs
+inside the network (hosts, ports, migration paths). `POSTGRES_PASSWORD` comes
+from `DB_eg_PASSWORD`, so the cluster and the app can never drift apart. The
+API and worker wait for healthy infra **and** a successful `migrate`.
+
+### Test stack — `docker-compose-test.yml`
+
+A disposable stack for verification runs and CI, built so that it runs on a
+machine that has never been set up:
+
+- 🧾 **No `.env`** — every variable the zod config requires is inline; anything
+  you may want to point elsewhere (core-service, Kashier) is `${VAR:-default}`.
+- 💾 **tmpfs storage** — Postgres and RabbitMQ start empty every run, so init SQL
+  and migrations always execute; Postgres runs with `fsync=off` for speed.
+- ⏩ **Fast timers** — sweeps, drains, offer TTLs and the archival window are
+  shortened so tests don't wait on production cadences.
+- 🔌 **Shifted host ports** (`15432`, `16379`, `15673`, API on `3101`) so it
+  runs alongside the dev stack without touching its data.
+
+```bash
+docker compose -f docker-compose-test.yml up --build -d
+docker compose -f docker-compose-test.yml logs -f order-service
+docker compose -f docker-compose-test.yml down -v
+
+# infrastructure only, for driving the play/ scripts from the host:
+docker compose -f docker-compose-test.yml up -d postgres redis rabbitmq migrate
+```
+
+## ⚙ Continuous Integration
+
+[`.github/workflows/order-service-ci.yml`](../.github/workflows/order-service-ci.yml)
+runs on every push and pull request to `main` that touches `order-service/**`
+(and on demand via `workflow_dispatch`):
+
+```mermaid
+flowchart LR
+    A["push / PR<br/>order-service/**"] --> B["setup Node 22<br/>+ npm cache"]
+    B --> C["npm ci"]
+    C --> D["typecheck<br/>app + scripts"]
+    D --> E["build"]
+```
+
+`npm run typecheck` checks both the application (`tsconfig.json`) and the
+operational scripts (`tsconfig.scripts.json`), so a broken script fails the
+build too.
 
 ## Documentation
 
@@ -156,8 +246,10 @@ variants.
 
 ## Verification
 
-There is no automated test suite yet. Each phase was verified with local
-scripts against real Postgres, Redis, RabbitMQ and Kashier's test environment —
+CI guards types and the build; behaviour is not yet covered by an automated
+test suite. Each phase was verified with local scripts against real Postgres,
+Redis, RabbitMQ and Kashier's test environment (now runnable on the throwaway
+[test stack](#test-stack--docker-compose-testyml)) —
 for example 48 finance checks including concurrent payouts, and 32 archival
 checks over 5,000 orders including crash recovery. Details and known limits:
 [`docs/status.md`](docs/status.md).
