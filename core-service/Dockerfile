@@ -1,16 +1,3 @@
-# syntax=docker/dockerfile:1
-
-# core-service image. Four targets are built from this one file:
-#   builder  - compiles TypeScript to dist/ (intermediate)
-#   migrator - runs `npm run migrate`; keeps src/ because the migrations are
-#              .ts files executed through tsx (DB_MIGRATIONS_EXTENSION=ts)
-#   test     - runs the Jest integration suite against throwaway infra
-#   runner   - the default, production target: dist/ + prod deps only
-#
-# bcrypt is a native addon with no musl prebuild, so every stage that installs
-# dependencies needs a compiler. The toolchain stays out of `runner`, which
-# copies an already-built node_modules from `prod-deps`.
-
 ARG NODE_VERSION=22-alpine
 
 

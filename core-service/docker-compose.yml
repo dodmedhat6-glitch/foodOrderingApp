@@ -1,21 +1,3 @@
-# Local stack for core-service: its own postgres (with PostGIS), redis and
-# rabbitmq, plus the API, the outbox worker and a one-shot migration job.
-#
-# Mailjet is the one dependency with no container - it is an external SaaS, so
-# MAILJET_* in .env must point at real credentials (or the sandbox) for the
-# password-reset flow to work. Everything else here is self-contained.
-#
-#   docker compose up -d --build
-#   docker compose logs -f core-service
-#
-# Interpolated values (${...}) come from ./.env, which Compose loads
-# automatically; the services themselves get the whole file via env_file.
-#
-# Published host ports deliberately default off the standard ones: order-service
-# runs its own postgres/redis/rabbitmq on 5432/6379/5672, and a developer
-# machine often has a native postgres or redis there too, so sharing the
-# defaults would make `up` fail on a port clash. Only the *host* side moves -
-# inside the network everything still talks on the standard ports, so no
 # application setting depends on this. Override any of them in .env
 # (PG_HOST_PORT, REDIS_HOST_PORT, RABBITMQ_HOST_PORT, RABBITMQ_UI_PORT).
 
@@ -37,10 +19,8 @@ services:
       # anywhere but .env.
       POSTGRES_DB: ${DB_NAME:?set DB_NAME in core-service/.env}
     ports:
-      - "${PG_HOST_PORT:-5433}:5432"
+      - "${PG_HOST_PORT:-5432}:5432"
     volumes:
-      # postgres 18+ wants a single mount here, not at .../data: it keeps the
-      # data in a major-version subdirectory so pg_upgrade --link can work.
       - postgres_data:/var/lib/postgresql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-postgres} -d ${DB_NAME}"]

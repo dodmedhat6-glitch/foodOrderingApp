@@ -1,18 +1,3 @@
-# Throwaway stack for the Jest integration suite (npm run test:integration).
-#
-#   docker compose -f docker-compose.test.yml up --build \
-#       --abort-on-container-exit --exit-code-from tests
-#   docker compose -f docker-compose.test.yml down -v
-#
-# Deliberately isolated from docker-compose.yml: its own project name, no
-# published ports (nothing here needs reaching from the host, and leaving them
-# off means a running dev stack is no obstacle) and postgres on tmpfs, so each
-# run starts from an empty database and leaves nothing behind.
-#
-# .dockerignore keeps .env.test out of the image, so tests/setup.env.ts finds
-# no file to load and every variable is supplied below instead. The values
-# mirror .env.test; only the hosts differ.
-
 name: core-service-test
 
 services:
@@ -20,15 +5,8 @@ services:
     image: postgis/postgis:18-3.6
     environment:
       POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: test
-      # Matches DB_NAME on the `tests` service. The entrypoint quotes the name
-      # when it creates the database, so the dot is not a problem, and the
-      # postgis image's own init hook enables the extension inside it.
+      POSTGRES_PASSWORD:  test #replace with a secure password in production
       POSTGRES_DB: DODS.test
-    # No volume, and the mount point is /var/lib/postgresql rather than
-    # .../data because that is where postgres 18+ expects it. On tmpfs the
-    # database is memory-backed and dies with the container, so every run
-    # starts from an empty schema.
     tmpfs:
       - /var/lib/postgresql
     healthcheck:

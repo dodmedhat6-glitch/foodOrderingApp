@@ -84,5 +84,5 @@ Each index exists for a specific query:
 ## Migrations
 
 `npm run migrate:all` migrates every region's hot shard;
-`npx tsx scripts/migrate-all.ts --cluster=archive` migrates the archive
+`npx tsx src/migrate.ts --cluster=archive` migrates the archive
 shards. Migrations are never edited after they ship: a fix is a new migration.

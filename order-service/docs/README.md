@@ -38,7 +38,7 @@ product's goals, not how this service is built.
 npm install
 cp .env.example .env            # fill in DB, Redis, RabbitMQ, core and Kashier values
 npm run migrate:all             # every region's hot shard
-npx tsx scripts/migrate-all.ts --cluster=archive   # every region's archive shard
+npx tsx src/migrate.ts --cluster=archive   # every region's archive shard
 npm run dev                     # API (HTTP + WebSocket) on PORT
 npm run dev:worker              # background jobs
 ```
