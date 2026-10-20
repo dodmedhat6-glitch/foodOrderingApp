@@ -110,10 +110,29 @@ cd order-service
 npm install
 cp .env.example .env                               # DB per region, Redis, RabbitMQ, core, Kashier
 npm run migrate:all                                # every region's hot shard
-npx tsx scripts/migrate-all.ts --cluster=archive   # every region's archive shard
+npx tsx src/migrate.ts --cluster=all                # or: both clusters, every region, in one pass
 npm run dev                                        # API (HTTP /api + WebSocket /ws)
 npm run dev:worker                                 # background jobs (separate terminal)
 ```
+
+### Or in Docker
+
+```bash
+docker compose up --build -d      # Postgres + Redis + RabbitMQ + migrate + API + worker
+docker compose logs -f order-service
+```
+
+`docker-compose.yml` reads the same `.env` and overrides only the hosts, the
+ports and the migration paths (the image has no `src/` and no `tsx`, so
+migrations run from `dist/`). `POSTGRES_PASSWORD` is taken from
+`DB_eg_PASSWORD`: every shard database in the stack lives in one cluster under
+one role, and two values would only drift. The one-shot `migrate` service
+applies the schema to all four databases before the API and worker start.
+
+For a throwaway stack that reads no `.env` at all — tmpfs storage, fresh
+databases every run, host ports shifted so it can sit next to the one above —
+use `docker-compose-test.yml`; its header documents the CI and host-driven
+variants.
 
 ### Scripts
 

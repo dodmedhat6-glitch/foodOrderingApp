@@ -4,6 +4,7 @@
 src/
   server.ts        API process: HTTP + WebSocket + core-events consumer
   worker.ts        background jobs process
+  migrate.ts       knex migrations across every shard (also `node dist/migrate.js` in containers)
   app.ts           express setup
   routes.ts        mounts every module's router under /api
   app/             business modules
@@ -21,7 +22,7 @@ src/
   pkg/             reusable, framework-free code (no env, no app imports)
     cache/  messaging/  payments/ (Kashier)  presence/ (Redis GEO)  utils/
   migrations/
-scripts/           migrate-all.ts, archive-now.ts
+scripts/           archive-now.ts
 play/              local test scripts (not committed)
 ```
 
