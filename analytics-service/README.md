@@ -1,8 +1,26 @@
-# analytics-service
+<div align="center">
+
+# 📊 analytics-service
+
+**Daily order and revenue rollups for QuickBite restaurant owners**
+
+![Python](https://img.shields.io/badge/Python-3.11+-3776AB?logo=python&logoColor=white)
+![FastAPI](https://img.shields.io/badge/FastAPI-009688?logo=fastapi&logoColor=white)
+![MongoDB](https://img.shields.io/badge/MongoDB-47A248?logo=mongodb&logoColor=white)
+![RabbitMQ](https://img.shields.io/badge/RabbitMQ-aio--pika-FF6600?logo=rabbitmq&logoColor=white)
+![mypy](https://img.shields.io/badge/mypy-strict-2A6DB2)
+![Ruff](https://img.shields.io/badge/lint-ruff-D7FF64?logo=ruff&logoColor=black)
+
+[← Platform overview](../README.md)
+
+</div>
+
+---
 
 Per-day rollups of QuickBite order activity. Consumes `order.events` from RabbitMQ, upserts aggregates into MongoDB, serves them read-only over HTTP. Python + FastAPI + pymongo + aio-pika, built to mirror the Node services next to it.
 
-[← Back to the platform overview](../README.md)
+> [!NOTE]
+> Unlike core-service and order-service, this service doesn't have a Dockerfile or CI workflow yet — both are planned. Today it runs natively against a local MongoDB and RabbitMQ, as described below.
 
 ## What it does
 

@@ -1,13 +1,31 @@
-# core-service
+<div align="center">
+
+# 🔐 core-service
+
+**Identity, catalogue and permissions for the QuickBite platform**
+
+[![Core Service CI](https://github.com/dodmedhat6-glitch/foodOrderingApp/actions/workflows/core-service-ci.yml/badge.svg)](https://github.com/dodmedhat6-glitch/foodOrderingApp/actions/workflows/core-service-ci.yml)
+![TypeScript](https://img.shields.io/badge/TypeScript-strict-3178C6?logo=typescript&logoColor=white)
+![Express](https://img.shields.io/badge/Express-5-000000?logo=express&logoColor=white)
+![PostGIS](https://img.shields.io/badge/PostgreSQL-PostGIS-4169E1?logo=postgresql&logoColor=white)
+![Docker](https://img.shields.io/badge/Docker-ready-2496ED?logo=docker&logoColor=white)
+![Jest](https://img.shields.io/badge/tested_with-Jest-C21325?logo=jest&logoColor=white)
+
+[← Platform overview](../README.md) ·
+[Getting started](#-getting-started) ·
+[Docker](#-docker) ·
+[Testing & CI](#-testing--ci)
+
+</div>
+
+---
 
 The identity and catalogue service of the platform. Every other service depends
 on the data it owns: users, restaurants, branches, products, delivery addresses
 and permissions.
 
 **Stack:** Node.js · TypeScript (strict) · Express 5 · PostgreSQL + PostGIS ·
-Knex · Redis · RabbitMQ · tsyringe · zod · Mailjet
-
-[← Back to the platform overview](../README.md)
+Knex · Redis · RabbitMQ · tsyringe · zod · Mailjet · Jest · Docker
 
 ## What it does
 
@@ -217,8 +235,13 @@ get no rows for existing products.
 | Auth | jsonwebtoken, bcrypt, cookie-parser |
 | Email | Mailjet |
 | Security | helmet, cors |
+| Testing | Jest + SWC, Supertest |
+| Containers / CI | Docker (multi-stage), Docker Compose, GitHub Actions |
 
-## Getting Started
+## 🚀 Getting Started
+
+The fastest way is [Docker](#-docker) — one command brings up PostGIS, Redis,
+RabbitMQ, the migrations, the API and the worker. To run it natively instead:
 
 ### Prerequisites
 
@@ -257,6 +280,103 @@ curl http://localhost:3000/api/health
 | `npm run build` / `npm start` / `npm run worker` | Compile with `tsc` and run from `dist/` |
 | `npm run migrate` | Fix legacy migration names, then `migrate:latest` |
 | `npm run knex -- <cmd>` | Any Knex CLI command (`migrate:list`, `migrate:rollback`, …) |
+| `npm test` | Jest unit tests (`tests/unit`) |
+| `npm run test:integration` | Jest integration tests against a real database (`tests/integration`) |
+| `npm run test:watch` | Unit tests in watch mode |
+
+## 🐳 Docker
+
+One multi-stage [`Dockerfile`](Dockerfile) (`node:22-alpine`) produces every
+image the service needs:
+
+```mermaid
+flowchart LR
+    deps["deps<br/>npm ci (all deps)"] --> builder["builder<br/>tsc → dist/"]
+    deps --> migrator["migrator<br/>npm run migrate"]
+    deps --> test["test<br/>jest integration"]
+    prod["prod-deps<br/>npm ci --omit=dev"] --> runner
+    builder --> runner["runner (default)<br/>dist/ + prod deps<br/>non-root · HEALTHCHECK"]
+```
+
+| Target | Used for |
+| --- | --- |
+| `runner` | Production image: compiled `dist/` and production dependencies only, runs as `node`, healthcheck on `/api/health`. Also runs the outbox worker (`node dist/worker.js`). |
+| `migrator` | One-shot schema migration job. Keeps `src/` because migrations are `.ts` files run through `tsx`. |
+| `test` | The Jest suite, run against throwaway infrastructure. |
+
+bcrypt is a native addon, so the dependency stages carry a compiler — but
+`runner` only copies an already-built `node_modules`, so no toolchain ships.
+`.dockerignore` keeps `.env` out of the build context entirely.
+
+### Development stack — `docker-compose.yml`
+
+```bash
+cp .env.example .env              # DB_PASSWORD and DB_NAME are required
+docker compose up -d --build
+docker compose logs -f core-service
+curl http://localhost:3000/api/health
+```
+
+| Service | What it is | Host port |
+| --- | --- | --- |
+| `postgres` | `postgis/postgis:18-3.6` — the PostGIS extension is enabled automatically | `5433` |
+| `redis` | `redis:7-alpine` | `6380` |
+| `rabbitmq` | `rabbitmq:3.13-management-alpine` (UI at http://localhost:15673) | `5673`, `15673` |
+| `migrate` | One-shot `migrator` job; exits when the schema is current | — |
+| `core-service` | The API | `3000` |
+| `core-worker` | Outbox worker draining `event_outbox` to RabbitMQ | — |
+
+- The API and worker start only after Postgres, Redis and RabbitMQ are
+  **healthy** and `migrate` has **completed successfully**.
+- Infra host ports are deliberately **shifted off the defaults** so this stack
+  runs next to order-service's (which uses `5432`/`6379`/`5672`) or a native
+  Postgres. Override them in `.env` with `PG_HOST_PORT`, `REDIS_HOST_PORT`,
+  `RABBITMQ_HOST_PORT`, `RABBITMQ_UI_PORT`, `API_HOST_PORT`.
+- Mailjet is the only external dependency — `MAILJET_*` must be real (or
+  sandbox) credentials for the password-reset email to actually send.
+
+## 🧪 Testing & CI
+
+Tests live in [`tests/`](tests/) and run on **Jest with the SWC transformer**:
+
+| Suite | Config | Runs |
+| --- | --- | --- |
+| Unit | `jest.config.js` | `tests/unit/**/*.test.ts` — pure logic, no I/O |
+| Integration | `jest.integration.config.js` | `tests/integration/**/*.integration.test.ts` — the real Express app via Supertest, against PostgreSQL/PostGIS with migrations applied in `globalSetup` and the email provider stubbed |
+
+### Run the whole suite in Docker
+
+[`docker-compose.test.yml`](docker-compose.test.yml) is a self-contained,
+throwaway stack: its own project name, **no published ports** (so it never
+collides with a running dev stack) and Postgres on **tmpfs**, so every run
+starts from an empty database and leaves nothing behind.
+
+```bash
+docker compose -f docker-compose.test.yml up --build --abort-on-container-exit --exit-code-from tests
+docker compose -f docker-compose.test.yml down -v
+```
+
+The `tests` container runs `npm ci → npm run build → npm test → npm run
+test:integration`, and its exit code becomes the command's exit code.
+
+### GitHub Actions
+
+[`.github/workflows/core-service-ci.yml`](../.github/workflows/core-service-ci.yml)
+runs **that exact command** on every push and pull request to `main` that
+touches `core-service/**`, then tears the stack down with `down -v` even if the
+tests fail. CI and a developer's machine therefore run the same containers —
+no "works on my machine" gap.
+
+```mermaid
+flowchart LR
+    A["push / PR<br/>core-service/**"] --> B["checkout"]
+    B --> C["compose up --build<br/>(test stack)"]
+    C --> D["build · unit · integration"]
+    D --> E{"exit code"}
+    E -->|0| F["✅ pass"]
+    E -->|≠0| G["❌ fail"]
+    D --> H["compose down -v<br/>(always)"]
+```
 
 ## Known Issues
 
@@ -267,15 +387,17 @@ curl http://localhost:3000/api/health
 - Refresh tokens are not rotated or revocable; reset OTPs are not single-use.
 - The `product_branch_details` trigger runs on product insert only, so a branch
   created later gets no rows for existing products.
-- No automated test suite yet.
+- Test coverage is still small: the harness and CI are in place, and suites are
+  being added module by module.
 
 ## Roadmap
 
+- [x] Docker images and Compose stacks for development and tests
+- [x] Jest unit + integration harness, running in CI
+- [ ] Broaden test coverage across every module
 - [ ] Send invitation emails; make reset OTPs single-use (`consumed_at`)
 - [ ] Rotate and revoke refresh tokens
 - [ ] Reuse an incoming correlation ID when one is provided
-- [ ] Automated tests (unit + integration against PostgreSQL)
 - [ ] OpenAPI documentation
-- [ ] Docker Compose for local development
 
 See also: [development workflow](../docs/development-workflow.md).
