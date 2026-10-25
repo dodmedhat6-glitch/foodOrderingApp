@@ -1,0 +1,98 @@
+# Local stack: MongoDB, RabbitMQ and the service itself.
+#
+# Configuration comes from `.env` — the same file `python server.py` reads —
+# with only the things that differ inside the network overridden below. For a
+# self-contained stack that needs no `.env` at all (CI), see
+# docker-compose-test.yml.
+#
+#   docker compose up --build -d
+#   docker compose logs -f analytics-service
+#   docker compose down            # keeps the volumes
+#   docker compose down -v         # throws the rollups away (they are derived)
+#
+# Mongo is standalone on purpose: no replica set, because nothing here uses a
+# multi-document transaction (CLAUDE.md §6).
+#
+# RabbitMQ here is this stack's own broker, so nothing real is publishing to
+# `order.events` — drive it with `play/publish_test.py`. To consume the actual
+# order-service events instead, leave this broker unused and point the service
+# at that stack's one:
+#
+#   docker compose up -d analytics-service
+#   RABBITMQ_URL=amqp://guest:guest@host.docker.internal:5672/ docker compose up -d analytics-service
+name: quickbite-analytics-service
+
+services:
+    mongo:
+        image: mongo:7
+        container_name: quickbite_analytics_mongo
+        restart: unless-stopped
+        ports:
+            - "27017:27017"
+        volumes:
+            - mongo_data:/data/db
+        healthcheck:
+            # The service pings `admin` at boot and dies if it cannot — wait for
+            # a mongod that answers, not merely a started container.
+            test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+            interval: 10s
+            timeout: 5s
+            retries: 5
+
+    rabbitmq:
+        # Same image and tag as order-service's stack: it is the service that
+        # declares `order.events`, this one only asserts it idempotently.
+        image: rabbitmq:3.13-management-alpine
+        container_name: quickbite_analytics_rabbitmq
+        restart: unless-stopped
+        ports:
+            - "5672:5672"
+            # Management UI — handy for watching the DLQ fill.
+            - "15672:15672"
+        volumes:
+            - rabbitmq_data:/var/lib/rabbitmq
+        healthcheck:
+            # `check_running` waits for the node to actually accept connections;
+            # `status` returns before the AMQP listener is up.
+            test: ["CMD", "rabbitmq-diagnostics", "-q", "check_running"]
+            interval: 10s
+            timeout: 10s
+            retries: 10
+
+    analytics-service:
+        build: .
+        image: quickbite/analytics-service:local
+        container_name: quickbite_analytics_service
+        restart: unless-stopped
+        ports:
+            - "4100:4100"
+        # `.env` supplies ACCESS_SECRET and CORE_INTERNAL_API_KEY (both required
+        # by lib/config.py); `environment` wins over it, which is the whole
+        # point — .env holds the developer-machine values.
+        env_file:
+            - .env
+        environment:
+            MONGO_URI: mongodb://mongo:27017
+            RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
+            # core-service is not part of this stack: RBAC lookups go to a
+            # core (or play/mock_core.py, which listens on 3999) running on the
+            # host. `.env`'s own CORE_SERVICE_BASE_URL says `localhost`, which
+            # inside a container means the container — hence the override and
+            # the separate name to override the override with.
+            CORE_SERVICE_BASE_URL: ${CORE_SERVICE_BASE_URL_DOCKER:-http://host.docker.internal:3999}
+        extra_hosts:
+            # Linux docker has no host.docker.internal by default, and the URL
+            # above relies on it resolving.
+            - "host.docker.internal:host-gateway"
+        depends_on:
+            mongo:
+                condition: service_healthy
+            # Not a hard gate in the code — a broker that is down at boot only
+            # costs the consumer, not the read API (server.py retries it in the
+            # background) — but waiting keeps the startup logs honest.
+            rabbitmq:
+                condition: service_healthy
+
+volumes:
+    mongo_data:
+    rabbitmq_data:

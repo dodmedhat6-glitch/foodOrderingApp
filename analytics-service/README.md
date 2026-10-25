@@ -20,7 +20,7 @@
 Per-day rollups of QuickBite order activity. Consumes `order.events` from RabbitMQ, upserts aggregates into MongoDB, serves them read-only over HTTP. Python + FastAPI + pymongo + aio-pika, built to mirror the Node services next to it.
 
 > [!NOTE]
-> Unlike core-service and order-service, this service doesn't have a Dockerfile or CI workflow yet — both are planned. Today it runs natively against a local MongoDB and RabbitMQ, as described below.
+> This service has no CI workflow yet — that one is still planned. Docker is here: [`Dockerfile`](Dockerfile), [`docker-compose.yml`](docker-compose.yml) and [`docker-compose-test.yml`](docker-compose-test.yml), covered under [With Docker](#with-docker) below. Running it natively against a local MongoDB and RabbitMQ, as described next, needs none of them.
 
 ## What it does
 
@@ -136,6 +136,35 @@ python -m compileall -q -x "\.venv" .
 ruff check .
 mypy .
 ```
+
+## With Docker
+
+An alternative to the three terminals: MongoDB, RabbitMQ and the service, all containers.
+
+```bash
+docker compose up --build -d          # reads your .env, overriding only the hosts
+docker compose logs -f analytics-service
+curl http://localhost:4100/health
+docker compose down                   # add -v to throw the rollups away
+```
+
+`.env` still supplies `ACCESS_SECRET` and `CORE_INTERNAL_API_KEY`; `MONGO_URI` and `RABBITMQ_URL` are overridden to the container hostnames. `CORE_SERVICE_BASE_URL` points at `host.docker.internal:3999` — `play/mock_core.py` on the host — because core-service is not part of this stack; override it with `CORE_SERVICE_BASE_URL_DOCKER`.
+
+For a stack that needs no `.env` at all — CI, or a clean clone — use the test file. Storage is tmpfs, so Mongo and RabbitMQ start empty every run, and the host ports are shifted (`14100`, `17017`, `17672`, management UI on `17673`) so it can run next to the dev stack:
+
+```bash
+docker compose -f docker-compose-test.yml up --build -d
+curl http://localhost:14100/health
+docker compose -f docker-compose-test.yml down -v
+```
+
+Infrastructure only, for driving `play/*.py` from the host against throwaway stores:
+
+```bash
+docker compose -f docker-compose-test.yml up -d mongo rabbitmq
+```
+
+The image runs `python server.py` as an unprivileged user, with the venv resolved from `uv.lock` in a throwaway builder stage — no uv, no ruff and no mypy in the runtime image. Its `HEALTHCHECK` hits `/health`, which answers 200 whenever a read can be served: a broker blip reports `"rabbit": "down"` and `"status": "degraded"` rather than marking the container unhealthy.
 
 ## With the real publisher
 

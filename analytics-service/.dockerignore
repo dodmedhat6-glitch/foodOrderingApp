@@ -1,0 +1,44 @@
+# The build context. The stages copy only pyproject.toml, uv.lock, server.py,
+# pkg/, lib/ and app/, so most of this is belt-and-braces — but the whole
+# context is uploaded to the daemon before any COPY runs, and every file in it
+# is a file that can bust the cache. Keeping it tight keeps `docker build` fast.
+#
+# Most important: .env must never enter the context. A secret is readable in an
+# intermediate layer forever, even when the runtime stage copies nothing but
+# the venv and the source tree.
+
+.env
+.env.*
+!.env.example
+*.log
+
+# Resolved in the builder from uv.lock. A host venv is also the wrong platform
+# (Windows Scripts/, macOS dylibs) and would be copied over a good one.
+.venv
+__pycache__
+*.py[cod]
+.mypy_cache
+.ruff_cache
+.pytest_cache
+
+.git
+.gitignore
+.gitattributes
+.github
+.idea
+.vscode
+.claude
+.mcp.json
+
+# Dev aids — mock_core, mint_jwt, publish_test, check_mongo. Gitignored, never
+# part of a build, and they would look like production entry points in an image.
+play/
+
+docs
+*.md
+*.png
+
+Dockerfile
+.dockerignore
+docker-compose.yml
+docker-compose-test.yml
