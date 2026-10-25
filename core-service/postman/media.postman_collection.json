@@ -1,0 +1,607 @@
+{
+  "info": {
+    "_postman_id": "8d3f2a61-4c7e-4b55-9b2f-0f1d5a7c9e10",
+    "name": "DODS core-service - Media",
+    "description": "Media module (core-service, app/media): upload, list, read, delete.\n\n## Setup\n1. Start core-service (`npm run dev`) and run migrations (`npm run migrate`).\n2. Set the collection variables: `baseUrl`, `email`, `password`, `restaurantId`.\n3. Run **Auth > Login** first. Authentication is cookie-based (`access_token`, httpOnly, set by `lib/auth/guard.ts`), and Postman's cookie jar replays it automatically on every later request - there is no Authorization header to set.\n4. For **Upload media (multipart)**, open the Body tab and pick a real image file for the `file` key. Postman cannot store a file path inside a shared collection, so that one field has to be selected by hand.\n\n## Required permissions\nThe caller must be a member of `:restaurantId` and hold `core:media` create/read/delete (seeded by migration 20261020090100 for owner and branch_manager; staff gets read only). A `system_admin` bypasses the permission lookup.\n\n## Two upload paths\n- **Direct** (`POST /restaurants/:id/media`): multipart, bytes proxied through the API. One call.\n- **Presigned** (`POST /restaurants/:id/media/upload-url` -> PUT to S3 -> `POST /media/:id/confirm`): bytes go straight to S3. Three calls, no API bandwidth.\n\nAccepted types: image/jpeg, png, webp, gif, avif. Max size: `MEDIA_MAX_UPLOAD_BYTES` (5 MiB default).\n\n`mediaURL` in every response is a presigned GET url valid for `S3_SIGNED_URL_EXPIRES_IN` seconds (900 default) - it is minted per read and is not stored, so don't treat it as permanent.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "http://localhost:3000/api",
+      "type": "string"
+    },
+    {
+      "key": "email",
+      "value": "owner@example.com",
+      "type": "string",
+      "description": "A restaurant owner/branch_manager of :restaurantId, or a system_admin."
+    },
+    {
+      "key": "password",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "restaurantId",
+      "value": "1",
+      "type": "string"
+    },
+    {
+      "key": "mediaId",
+      "value": "",
+      "type": "string",
+      "description": "Filled in automatically by the upload requests."
+    },
+    {
+      "key": "uploadUrl",
+      "value": "",
+      "type": "string",
+      "description": "Filled in by 'Create upload url'; consumed by 'PUT image to S3'."
+    },
+    {
+      "key": "mediaUrl",
+      "value": "",
+      "type": "string",
+      "description": "Last presigned GET url returned by the API."
+    }
+  ],
+  "item": [
+    {
+      "name": "Auth",
+      "description": "Run Login once; the access_token cookie it sets authenticates everything else.",
+      "item": [
+        {
+          "name": "Login",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"login succeeded\", () => pm.response.to.have.status(200));",
+                  "",
+                  "// Cookie-based auth: Postman's jar keeps access_token and replays it.",
+                  "// Surfaced here only so a failure is obvious at this step rather than",
+                  "// as a confusing 401 three requests later.",
+                  "pm.test(\"access_token cookie was set\", () => {",
+                  "    const setCookie = pm.response.headers.get(\"set-cookie\") || \"\";",
+                  "    pm.expect(setCookie + pm.cookies.toString()).to.include(\"access_token\");",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n    \"email\": \"{{email}}\",\n    \"password\": \"{{password}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/auth/login",
+              "host": ["{{baseUrl}}"],
+              "path": ["auth", "login"]
+            },
+            "description": "Sets the httpOnly access_token cookie used by every media request."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Direct upload",
+      "description": "Bytes travel through core-service: multer parses the multipart body in memory and the service PUTs it to S3 (app/media/upload.middleware.ts).",
+      "item": [
+        {
+          "name": "Upload media (multipart)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"201 created\", () => pm.response.to.have.status(201));",
+                  "",
+                  "const media = pm.response.json().data.media;",
+                  "pm.collectionVariables.set(\"mediaId\", media.id);",
+                  "pm.collectionVariables.set(\"mediaUrl\", media.mediaURL);",
+                  "",
+                  "pm.test(\"status is ready\", () => pm.expect(media.status).to.eql(\"ready\"));",
+                  "pm.test(\"key is under restaurant/<id>/\", () =>",
+                  "    pm.expect(media.mediaPath).to.match(new RegExp(`^restaurant/${pm.collectionVariables.get(\"restaurantId\")}/`)));",
+                  "pm.test(\"presigned mediaURL returned\", () => pm.expect(media.mediaURL).to.be.a(\"string\").and.include(\"X-Amz-Signature\"));",
+                  "pm.test(\"attributed to the caller's restaurant\", () =>",
+                  "    pm.expect(String(media.restaurantId)).to.eql(String(pm.collectionVariables.get(\"restaurantId\"))));",
+                  "pm.test(\"size recorded\", () => pm.expect(Number(media.sizeBytes)).to.be.above(0));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "file",
+                  "type": "file",
+                  "src": [],
+                  "description": "Pick a real image here (jpeg/png/webp/gif/avif, max 5 MiB). Required - Postman cannot ship a file path in a collection."
+                }
+              ]
+            },
+            "url": {
+              "raw": "{{baseUrl}}/restaurants/{{restaurantId}}/media",
+              "host": ["{{baseUrl}}"],
+              "path": ["restaurants", "{{restaurantId}}", "media"]
+            },
+            "description": "multipart/form-data, field name `file`. Do not set Content-Type by hand - Postman adds the multipart boundary.\n\nThe media row is written as `pending` before the S3 PUT and settled to `ready`/`failed`, so a failed upload leaves a traceable row rather than nothing."
+          },
+          "response": []
+        },
+        {
+          "name": "Download the uploaded image (presigned GET)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"200 from S3\", () => pm.response.to.have.status(200));",
+                  "pm.test(\"content-type preserved\", () =>",
+                  "    pm.expect(pm.response.headers.get(\"content-type\")).to.include(\"image/\"));",
+                  "pm.test(\"body is a real image (non-empty)\", () =>",
+                  "    pm.expect(pm.response.responseSize).to.be.above(0));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{mediaUrl}}",
+              "host": ["{{mediaUrl}}"]
+            },
+            "description": "Hits S3 directly with the presigned url from the previous response - proves the bytes really landed in the bucket. Expires after S3_SIGNED_URL_EXPIRES_IN seconds; re-run 'Get media by id' for a fresh url."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Presigned upload",
+      "description": "Three-step browser-direct flow: reserve a row + url, PUT straight to S3, then confirm. No image bytes pass through core-service.",
+      "item": [
+        {
+          "name": "1. Create upload url",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"201 created\", () => pm.response.to.have.status(201));",
+                  "",
+                  "const body = pm.response.json().data;",
+                  "pm.collectionVariables.set(\"mediaId\", body.media.id);",
+                  "pm.collectionVariables.set(\"uploadUrl\", body.uploadUrl);",
+                  "",
+                  "pm.test(\"row starts pending\", () => pm.expect(body.media.status).to.eql(\"pending\"));",
+                  "pm.test(\"no mediaURL until the object exists\", () => pm.expect(body.media.mediaURL).to.eql(null));",
+                  "pm.test(\"signed PUT url returned\", () => pm.expect(body.uploadUrl).to.include(\"X-Amz-Signature\"));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n    \"fileName\": \"storefront.png\",\n    \"contentType\": \"image/png\",\n    \"sizeBytes\": 29318\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/restaurants/{{restaurantId}}/media/upload-url",
+              "host": ["{{baseUrl}}"],
+              "path": ["restaurants", "{{restaurantId}}", "media", "upload-url"]
+            },
+            "description": "`fileName` is only used for the extension - the stored key is always `restaurant/<restaurantId>/<uuid>.<ext>`, so a client-supplied name never becomes a path segment and two restaurants uploading `logo.png` cannot collide.\n\n`sizeBytes` is optional and checked against the max upload size up front."
+          },
+          "response": []
+        },
+        {
+          "name": "2. PUT image to S3",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"S3 accepted the object\", () => pm.response.to.have.status(200));",
+                  "pm.test(\"S3 returned an ETag\", () => pm.expect(pm.response.headers.get(\"etag\")).to.be.a(\"string\"));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "PUT",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "image/png",
+                "description": "Must match the contentType sent to /media/upload-url - it is part of the signature."
+              }
+            ],
+            "body": {
+              "mode": "file",
+              "file": {
+                "src": ""
+              }
+            },
+            "url": {
+              "raw": "{{uploadUrl}}",
+              "host": ["{{uploadUrl}}"]
+            },
+            "description": "Goes straight to S3, not to core-service - no cookie, no auth. Select the same image file in the Body tab (binary).\n\nThe Content-Type header must equal the `contentType` from step 1 or S3 rejects the signature."
+          },
+          "response": []
+        },
+        {
+          "name": "3. Confirm upload",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"200 ok\", () => pm.response.to.have.status(200));",
+                  "",
+                  "const media = pm.response.json().data.media;",
+                  "pm.collectionVariables.set(\"mediaUrl\", media.mediaURL);",
+                  "",
+                  "pm.test(\"status flipped to ready\", () => pm.expect(media.status).to.eql(\"ready\"));",
+                  "pm.test(\"mediaURL now available\", () => pm.expect(media.mediaURL).to.be.a(\"string\"));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/media/{{mediaId}}/confirm",
+              "host": ["{{baseUrl}}"],
+              "path": ["media", "{{mediaId}}", "confirm"]
+            },
+            "description": "Flips the row from `pending` to `ready`. Idempotent: calling it again on a ready row returns 200 unchanged. A row left `pending` means the client never finished its PUT - that is the point of the two-step design."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Read",
+      "item": [
+        {
+          "name": "List restaurant media",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"200 ok\", () => pm.response.to.have.status(200));",
+                  "",
+                  "const body = pm.response.json();",
+                  "pm.test(\"paginated envelope\", () => {",
+                  "    pm.expect(body.data).to.be.an(\"array\");",
+                  "    pm.expect(body.meta).to.have.property(\"hasMore\");",
+                  "    pm.expect(body.meta).to.have.property(\"nextCursor\");",
+                  "});",
+                  "pm.test(\"only this restaurant's media\", () => {",
+                  "    const wanted = String(pm.collectionVariables.get(\"restaurantId\"));",
+                  "    body.data.forEach((m) => pm.expect(String(m.restaurantId)).to.eql(wanted));",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/restaurants/{{restaurantId}}/media?limit=20&sortBy=id&sortOrder=desc",
+              "host": ["{{baseUrl}}"],
+              "path": ["restaurants", "{{restaurantId}}", "media"],
+              "query": [
+                {
+                  "key": "limit",
+                  "value": "20"
+                },
+                {
+                  "key": "sortBy",
+                  "value": "id"
+                },
+                {
+                  "key": "sortOrder",
+                  "value": "desc"
+                },
+                {
+                  "key": "cursor",
+                  "value": "",
+                  "disabled": true,
+                  "description": "meta.nextCursor from the previous page."
+                },
+                {
+                  "key": "filter[status][eq]",
+                  "value": "ready",
+                  "disabled": true,
+                  "description": "Filterable columns: id, status, uploaded_by, content_type."
+                }
+              ]
+            },
+            "description": "Cursor-paginated (lib/http/pagination). Every row carries a freshly minted presigned `mediaURL`; `pending`/`failed`/`deleted` rows carry `null` because there is no object to serve."
+          },
+          "response": []
+        },
+        {
+          "name": "Get media by id",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"200 ok\", () => pm.response.to.have.status(200));",
+                  "",
+                  "const media = pm.response.json().data.media;",
+                  "pm.collectionVariables.set(\"mediaUrl\", media.mediaURL);",
+                  "",
+                  "pm.test(\"expected shape\", () => {",
+                  "    pm.expect(media).to.have.all.keys(",
+                  "        \"id\", \"restaurantId\", \"uploadedBy\", \"status\",",
+                  "        \"mediaPath\", \"mediaURL\", \"contentType\", \"sizeBytes\", \"createdAt\");",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/media/{{mediaId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["media", "{{mediaId}}"]
+            },
+            "description": "Use this to refresh an expired `mediaURL` - the signed url is generated per read, never stored."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Delete",
+      "item": [
+        {
+          "name": "Delete media",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"200 ok\", () => pm.response.to.have.status(200));",
+                  "pm.test(\"row tombstoned, not removed\", () =>",
+                  "    pm.expect(pm.response.json().data.media.status).to.eql(\"deleted\"));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/media/{{mediaId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["media", "{{mediaId}}"]
+            },
+            "description": "Removes the S3 object and sets `status = 'deleted'`. The row stays so references from other tables (a product image, a restaurant logo) remain resolvable and the upload is still auditable. Calling it twice is a no-op."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Negative cases",
+      "description": "The guards, each asserted on its own status code. Run these after an upload so {{mediaId}} is set.",
+      "item": [
+        {
+          "name": "Reject non-image (415)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"415 unsupported media type\", () => pm.response.to.have.status(415));",
+                  "pm.test(\"lists what is allowed\", () =>",
+                  "    pm.expect(pm.response.json().data.allowed).to.include(\"image/png\"));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "file",
+                  "type": "file",
+                  "src": [],
+                  "description": "Pick any non-image file (a .pdf or .txt) to exercise the mime allowlist."
+                }
+              ]
+            },
+            "url": {
+              "raw": "{{baseUrl}}/restaurants/{{restaurantId}}/media",
+              "host": ["{{baseUrl}}"],
+              "path": ["restaurants", "{{restaurantId}}", "media"]
+            },
+            "description": "multer's fileFilter rejects anything outside the allowlist before a byte reaches S3."
+          },
+          "response": []
+        },
+        {
+          "name": "Reject missing file (400)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"400 bad request\", () => pm.response.to.have.status(400));",
+                  "pm.test(\"says a file is required\", () =>",
+                  "    pm.expect(pm.response.json().data.message).to.include(\"file\"));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "formdata",
+              "formdata": []
+            },
+            "url": {
+              "raw": "{{baseUrl}}/restaurants/{{restaurantId}}/media",
+              "host": ["{{baseUrl}}"],
+              "path": ["restaurants", "{{restaurantId}}", "media"]
+            },
+            "description": "Empty multipart body - no `file` field at all."
+          },
+          "response": []
+        },
+        {
+          "name": "Reject another restaurant's media (403)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"403 forbidden\", () => pm.response.to.have.status(403));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/restaurants/999999/media",
+              "host": ["{{baseUrl}}"],
+              "path": ["restaurants", "999999", "media"]
+            },
+            "description": "requireRestaurantMember rejects a restaurantId the caller is not a member of. (A system_admin login bypasses this and would return 200 - expected.)"
+          },
+          "response": []
+        },
+        {
+          "name": "Reject unknown media id (404)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"404 not found\", () => pm.response.to.have.status(404));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/media/999999999",
+              "host": ["{{baseUrl}}"],
+              "path": ["media", "999999999"]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Reject unauthenticated (401)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"401 unauthenticated\", () => pm.response.to.have.status(401));"
+                ]
+              }
+            },
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// Postman's cookie jar would otherwise replay access_token here.",
+                  "// Clearing it for this one host is what makes the 401 reachable.",
+                  "const jar = pm.cookies.jar();",
+                  "jar.clear(pm.collectionVariables.get(\"baseUrl\"), () => {});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/media/{{mediaId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["media", "{{mediaId}}"]
+            },
+            "description": "Clears the access_token cookie first, so this must 401. Re-run **Auth > Login** afterwards before using the rest of the collection."
+          },
+          "response": []
+        }
+      ]
+    }
+  ]
+}

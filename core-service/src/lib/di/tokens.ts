@@ -9,6 +9,7 @@ export const tokens = {
     CustomerAddressService: Symbol.for("CustomerAddressService"),
     PermissionCashService: Symbol.for("PermissionCashService"),
     InternalService: Symbol.for("InternalService"),
+    MediaService: Symbol.for("MediaService"),
 
     // controllers
     AuthController: Symbol.for("AuthController"),
@@ -20,6 +21,7 @@ export const tokens = {
     CustomerAddressController: Symbol.for("CustomerAddressController"),
     PermissionCashController: Symbol.for("PermissionCashController"),
     InternalController: Symbol.for("InternalController"),
+    MediaController: Symbol.for("MediaController"),
 
     //Lib/infra/
     Logger: Symbol.for("Logger"),
@@ -31,5 +33,8 @@ export const tokens = {
     MessageBroker: Symbol.for("MessageBroker"),
 
     //email
-    EmailProvider: Symbol.for("EmailProvider")
+    EmailProvider: Symbol.for("EmailProvider"),
+
+    // object storage (S3) - see pkg/storage
+    StorageProvider: Symbol.for("StorageProvider")
 }

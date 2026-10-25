@@ -30,9 +30,24 @@ const schema = z.object({
     MAILJET_FROM_EMAIL: z.string(),
     MAILJET_FROM_NAME: z.string(),
     ORDER_SERVICE_API_KEY: z.string(),
+    AWS_REGION: z.string().default("eu-north-1"),
+    S3_BUCKET: z.string(),
+    AWS_ACCESS_KEY_ID: z.string(),
+    AWS_SECRET_ACCESS_KEY: z.string(),
+    S3_SIGNED_URL_EXPIRES_IN: z.string().default("900"),
+    MEDIA_MAX_UPLOAD_BYTES: z.string().default("5242880"),
 })
 
 const parsed = schema.parse(process.env)
+
+/**
+ * S3 takes a bucket *name*; the console hands out an ARN
+ * (arn:aws:s3:::dodsquickbites3). Accept either so the value can be pasted
+ * from either place.
+ */
+function toBucketName(value: string): string {
+    return value.startsWith("arn:aws:s3:::") ? value.slice("arn:aws:s3:::".length) : value;
+}
 
 export const env = {
     port: Number(parsed.PORT),
@@ -84,5 +99,18 @@ export const env = {
     // (see pkg/api-key/hash.ts, app/rbac/repository/api-key.repo.ts).
     serviceApiKeys: {
         orderService: parsed.ORDER_SERVICE_API_KEY
+    },
+
+    // Object storage for the media module (app/media) - see pkg/storage/s3.ts.
+    s3: {
+        region: parsed.AWS_REGION,
+        bucket: toBucketName(parsed.S3_BUCKET),
+        accessKeyId: parsed.AWS_ACCESS_KEY_ID,
+        secretAccessKey: parsed.AWS_SECRET_ACCESS_KEY,
+        signedUrlExpiresIn: Number(parsed.S3_SIGNED_URL_EXPIRES_IN)
+    },
+
+    media: {
+        maxUploadBytes: Number(parsed.MEDIA_MAX_UPLOAD_BYTES)
     }
 }
