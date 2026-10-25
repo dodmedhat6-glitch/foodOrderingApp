@@ -1,4 +1,4 @@
-import { container } from "tsyringe";
+import { container, instanceCachingFactory } from "tsyringe";
 import { tokens } from "./tokens";
 import { AuthService } from "../../app/auth/service/auth.service";
 import { AuthController } from "../../app/auth/controller/auth.controller";
@@ -25,7 +25,7 @@ import {mailjetProvider} from "../../pkg/email/mailjet";
 import {env} from "../config/env";
 import {emailProvider} from "../email/init";
 import {messageBroker} from "../message-broker/init";
-import {storageProvider} from "../storage/init";
+import {getStorageProvider} from "../storage/init";
 
 container.registerSingleton(tokens.AuthService, AuthService);
 container.registerSingleton(tokens.AuthController, AuthController);
@@ -60,6 +60,11 @@ container.registerSingleton(tokens.MediaController, MediaController);
 container.registerInstance(tokens.CacheProvider, cacheProvider);
 container.registerInstance(tokens.EmailProvider, emailProvider)
 container.registerInstance(tokens.MessageBroker, messageBroker)
-container.registerInstance(tokens.StorageProvider, storageProvider)
+// A factory, not an instance: the S3 client is built (and its credentials
+// validated) on first resolve, so importing this container does not require
+// AWS config from a process that never serves media.
+container.register(tokens.StorageProvider, {
+    useFactory: instanceCachingFactory(() => getStorageProvider())
+})
 
 export { container };

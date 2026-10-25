@@ -30,12 +30,22 @@ const schema = z.object({
     MAILJET_FROM_EMAIL: z.string(),
     MAILJET_FROM_NAME: z.string(),
     ORDER_SERVICE_API_KEY: z.string(),
+    MEDIA_MAX_UPLOAD_BYTES: z.string().default("5242880"),
+})
+
+/**
+ * The S3 credentials live in their own schema, parsed on first use rather than
+ * at import time. Everything above is needed by any process that boots the
+ * app; these four are needed only by the media module, and folding them into
+ * the schema above would mean every unit test that transitively imports this
+ * file had to supply AWS credentials to get as far as its first assertion.
+ */
+const s3Schema = z.object({
     AWS_REGION: z.string().default("eu-north-1"),
     S3_BUCKET: z.string(),
     AWS_ACCESS_KEY_ID: z.string(),
     AWS_SECRET_ACCESS_KEY: z.string(),
     S3_SIGNED_URL_EXPIRES_IN: z.string().default("900"),
-    MEDIA_MAX_UPLOAD_BYTES: z.string().default("5242880"),
 })
 
 const parsed = schema.parse(process.env)
@@ -47,6 +57,30 @@ const parsed = schema.parse(process.env)
  */
 function toBucketName(value: string): string {
     return value.startsWith("arn:aws:s3:::") ? value.slice("arn:aws:s3:::".length) : value;
+}
+
+export interface S3Env {
+    region: string;
+    bucket: string;
+    accessKeyId: string;
+    secretAccessKey: string;
+    signedUrlExpiresIn: number;
+}
+
+let s3Cache: S3Env | undefined
+
+function loadS3(): S3Env {
+    if (s3Cache === undefined) {
+        const s3 = s3Schema.parse(process.env)
+        s3Cache = {
+            region: s3.AWS_REGION,
+            bucket: toBucketName(s3.S3_BUCKET),
+            accessKeyId: s3.AWS_ACCESS_KEY_ID,
+            secretAccessKey: s3.AWS_SECRET_ACCESS_KEY,
+            signedUrlExpiresIn: Number(s3.S3_SIGNED_URL_EXPIRES_IN)
+        }
+    }
+    return s3Cache
 }
 
 export const env = {
@@ -102,12 +136,11 @@ export const env = {
     },
 
     // Object storage for the media module (app/media) - see pkg/storage/s3.ts.
-    s3: {
-        region: parsed.AWS_REGION,
-        bucket: toBucketName(parsed.S3_BUCKET),
-        accessKeyId: parsed.AWS_ACCESS_KEY_ID,
-        secretAccessKey: parsed.AWS_SECRET_ACCESS_KEY,
-        signedUrlExpiresIn: Number(parsed.S3_SIGNED_URL_EXPIRES_IN)
+    // A getter, not a value: reading it is what validates the credentials, so
+    // a process that never touches media never needs them. Throws a ZodError
+    // naming the missing keys, same as the rest of the schema would.
+    get s3(): S3Env {
+        return loadS3()
     },
 
     media: {
