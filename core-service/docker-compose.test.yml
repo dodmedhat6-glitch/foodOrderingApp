@@ -93,15 +93,15 @@ services:
 
       ORDER_SERVICE_API_KEY: test-order-service-api-key
 
-      # No test here talks to S3; these only exist because lib/config/env.ts
-      # validates the whole schema at import time, so any suite that pulls in
-      # env (app/auth/utils.ts does) needs them present.
+      # Throwaway S3 config, like the broker and database above. Unit tests do
+      # not need these any more (env validates the S3 block on first use, not
+      # at import), but the integration suite boots the whole app, and that
+      # resolves the media routes' storage dependency. No test calls S3.
       AWS_REGION: eu-north-1
       S3_BUCKET: test-bucket
       AWS_ACCESS_KEY_ID: test
       AWS_SECRET_ACCESS_KEY: test
       S3_SIGNED_URL_EXPIRES_IN: "900"
-      MEDIA_MAX_UPLOAD_BYTES: "5242880"
     depends_on:
       postgres-test:
         condition: service_healthy
