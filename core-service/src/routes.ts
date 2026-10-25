@@ -8,6 +8,7 @@ import {rbacRouter} from "./app/rbac/routes";
 import {internalRouter} from "./app/internal/routes";
 import {productRouter} from "./app/product/routes";
 import {customerAddressRouter} from "./app/addresses/routes";
+import {mediaRouter} from "./app/media/routes";
 export const router = Router();
 
 router.use("/health", healthRouter)
@@ -24,6 +25,9 @@ router.use('/' , rbacRouter)
 
 // Catalogue: /restaurants/:restaurantId/categories|products, /branches/:branchId/products, /products/:id
 router.use('/' , productRouter)
+
+// Media: /restaurants/:restaurantId/media, /media/:id
+router.use('/' , mediaRouter)
 
 // The caller's own delivery addresses (customer, JWT-scoped)
 router.use('/addresses' , customerAddressRouter)

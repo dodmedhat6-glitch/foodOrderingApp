@@ -17,12 +17,15 @@ import { CustomerAddressController } from "../../app/addresses/controller/custom
 import { PermissionsCashService } from "../../app/rbac/service/permissions-cash.service";
 import { InternalService } from "../../app/internal/service/internal.service";
 import { InternalController } from "../../app/internal/controller/internal.controller";
+import { MediaService } from "../../app/media/service/media.service";
+import { MediaController } from "../../app/media/controller/media.controller";
 import { Logger } from "../logger/logger";
 import {cacheProvider} from "../cache/init";
 import {mailjetProvider} from "../../pkg/email/mailjet";
 import {env} from "../config/env";
 import {emailProvider} from "../email/init";
 import {messageBroker} from "../message-broker/init";
+import {storageProvider} from "../storage/init";
 
 container.registerSingleton(tokens.AuthService, AuthService);
 container.registerSingleton(tokens.AuthController, AuthController);
@@ -51,8 +54,12 @@ container.registerSingleton(tokens.Logger, Logger);
 container.registerSingleton(tokens.InternalService, InternalService);
 container.registerSingleton(tokens.InternalController, InternalController);
 
+container.registerSingleton(tokens.MediaService, MediaService);
+container.registerSingleton(tokens.MediaController, MediaController);
+
 container.registerInstance(tokens.CacheProvider, cacheProvider);
 container.registerInstance(tokens.EmailProvider, emailProvider)
 container.registerInstance(tokens.MessageBroker, messageBroker)
+container.registerInstance(tokens.StorageProvider, storageProvider)
 
 export { container };

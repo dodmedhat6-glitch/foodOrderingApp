@@ -1,0 +1,113 @@
+# Throwaway stack for verification runs and CI.
+#
+# Three things make it different from docker-compose.yml, and all three are the
+# point:
+#
+#   1. It reads no `.env`. Every variable lib/config.py requires is supplied
+#      inline, so this file runs on a machine that has never been set up — a CI
+#      runner, or a clean clone. Anything you may legitimately want to point
+#      elsewhere (core-service) is written `${VAR:-default}` and can be
+#      overridden from the shell.
+#   2. Storage is tmpfs. Mongo and RabbitMQ start empty every single time, so
+#      the indexes are always re-created and a test can never pass because of a
+#      rollup — or a remembered `eventId` — an earlier run left behind.
+#   3. Host ports are shifted out of the way, so it can run alongside the dev
+#      stack and the dev stack's data is never at risk. They sit below the
+#      ephemeral range on purpose: Windows reserves blocks up there for Hyper-V
+#      (`netsh int ipv4 show excludedportrange protocol=tcp`), and a reserved
+#      one fails to bind with a permissions error that reads like a bug.
+#
+#   docker compose -f docker-compose-test.yml up --build -d
+#   docker compose -f docker-compose-test.yml logs -f analytics-service
+#   docker compose -f docker-compose-test.yml down -v
+#
+# Infrastructure only — for driving play/*.py from the host against throwaway
+# stores — is the same command with an explicit service list:
+#
+#   docker compose -f docker-compose-test.yml up -d mongo rabbitmq
+#
+# The host-side scripts read `.env`, so point them at the shifted ports in the
+# shell that runs them (MONGO_URI=mongodb://localhost:17017,
+# RABBITMQ_URL=amqp://guest:guest@localhost:17672/).
+name: quickbite-analytics-service-test
+
+services:
+    mongo:
+        image: mongo:7
+        ports:
+            - "17017:27017"
+        tmpfs:
+            # In RAM: the database is gone with the container, which is what
+            # makes every run re-create the indexes from an empty collection.
+            - /data/db
+        healthcheck:
+            test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+            interval: 2s
+            timeout: 3s
+            retries: 30
+
+    rabbitmq:
+        image: rabbitmq:3.13-management-alpine
+        ports:
+            - "17672:5672"
+            - "17673:15672"
+        tmpfs:
+            # uid/gid 100:101 is `rabbitmq` in this image. A bare tmpfs mounts
+            # root-owned, and the node then cannot read the .erlang.cookie it
+            # just wrote: "eacces", and the kernel pid terminates at boot.
+            - /var/lib/rabbitmq:uid=100,gid=101
+        healthcheck:
+            # `check_running` waits for the node to accept connections;
+            # `status` returns before the AMQP listener is up.
+            test: ["CMD", "rabbitmq-diagnostics", "-q", "check_running"]
+            interval: 3s
+            timeout: 10s
+            retries: 30
+
+    analytics-service:
+        build: .
+        image: quickbite/analytics-service:test
+        restart: "no"
+        ports:
+            - "14100:4100"
+        environment:
+            PORT: "4100"
+            LOG_LEVEL: DEBUG
+
+            # Test-only, and fixed on purpose: a token minted by one run must
+            # verify in the next, and it has to match core-service's and
+            # order-service's secret for any cross-service test to work. ≥ 32
+            # bytes or PyJWT warns on every verify.
+            ACCESS_SECRET: ${ACCESS_SECRET:-test-access-secret-at-least-32-bytes}
+
+            MONGO_URI: mongodb://mongo:27017
+            MONGO_DB: quickbite_analytics_test
+
+            RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
+            RABBITMQ_ORDER_EVENTS_EXCHANGE: order.events
+            RABBITMQ_ORDER_EVENTS_QUEUE: analytics-service.order-events
+            RABBITMQ_ORDER_EVENTS_BINDINGS: "order.#,payment.#"
+            RABBITMQ_ORDER_EVENTS_DLX: analytics-service.order-events.dlx
+            RABBITMQ_ORDER_EVENTS_DLQ: analytics-service.order-events.dlq
+            RABBITMQ_PREFETCH: "32"
+            EVENT_DEDUPE_TTL_DAYS: "7"
+
+            # host.docker.internal reaches a core-service — or
+            # play/mock_core.py — running on the host, which is how the RBAC
+            # path is driven locally. In CI, point it at a mock or a core
+            # container.
+            CORE_SERVICE_BASE_URL: ${CORE_SERVICE_BASE_URL:-http://host.docker.internal:3999}
+            CORE_INTERNAL_API_KEY: ${CORE_INTERNAL_API_KEY:-test-internal-api-key}
+            CORE_TIMEOUT_MS: "3000"
+            # Short, so a test that changes a role's permissions in core does
+            # not sit through a production TTL waiting for the cache to drop it.
+            RBAC_CACHE_TTL_SEC: "5"
+
+            ANALYTICS_MAX_RANGE_DAYS: "366"
+        extra_hosts:
+            - "host.docker.internal:host-gateway"
+        depends_on:
+            mongo:
+                condition: service_healthy
+            rabbitmq:
+                condition: service_healthy

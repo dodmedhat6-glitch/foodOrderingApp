@@ -24,3 +24,6 @@ coverage/
 
 # Nested standalone repo - has its own git history
 MCPServer/
+
+# Claude Code worktrees (nested anywhere)
+**/.claude/worktrees/
