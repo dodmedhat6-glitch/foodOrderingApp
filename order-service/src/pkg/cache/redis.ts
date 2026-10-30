@@ -1,5 +1,12 @@
-import Redis from "ioredis";
+import Redis, {Cluster} from "ioredis";
 import type {ICacheProvider} from "./cache.interface";
+
+/**
+ * Standalone or cluster-mode connection. Both expose the same command API for
+ * everything used here; the one place they differ (SCAN) is handled in
+ * `delByPattern`.
+ */
+export type RedisClient = Redis | Cluster;
 
 export class RedisCacheProvider implements ICacheProvider {
     /**
@@ -8,20 +15,22 @@ export class RedisCacheProvider implements ICacheProvider {
      * The adapter still needs its own subscriber via `client.duplicate()` —
      * once ioredis is in subscribe mode it can't serve get/set.
      */
-    constructor(public readonly client: Redis) {}
+    constructor(public readonly client: RedisClient) {}
 
     async get(key: string): Promise<string | null> {
         return this.client.get(key);
     }
 
     /**
-     * `mget` is variadic and errors on an empty argument list, so the empty
-     * case short-circuits. ioredis returns `(string | null)[]` aligned with
-     * the requested keys, which is the contract callers index against.
+     * One GET per key, issued together, rather than MGET: on a cluster-mode
+     * server MGET fails with CROSSSLOT unless every key hashes to the same
+     * slot. Concurrent GETs are still written to the socket back to back, so
+     * it stays a single round trip per node. The result is aligned with the
+     * requested keys, which is the contract callers index against.
      */
     async getMany(keys: string[]): Promise<(string | null)[]> {
         if (keys.length === 0) return [];
-        return this.client.mget(keys);
+        return Promise.all(keys.map((key) => this.client.get(key)));
     }
 
     async set(key: string, value: string, ttlSeconds?: number): Promise<void> {
@@ -33,19 +42,19 @@ export class RedisCacheProvider implements ICacheProvider {
     }
 
     /**
-     * Writes many keys in one round trip via a pipeline. Same motivation as
-     * `getMany`: repopulating a basket's worth of product projections should
-     * cost one network hop, not one per line.
+     * Writes many keys concurrently. Same motivation as `getMany`:
+     * repopulating a basket's worth of product projections should cost one
+     * network hop, not one per line. Not a pipeline: in cluster mode ioredis
+     * rejects a pipeline whose keys span slots on different shards.
      */
     async setMany(entries: Array<{key: string; value: string}>, ttlSeconds?: number): Promise<void> {
         if (entries.length === 0) return;
 
-        const pipeline = this.client.pipeline();
-        for (const {key, value} of entries) {
-            if (ttlSeconds) pipeline.set(key, value, "EX", ttlSeconds);
-            else pipeline.set(key, value);
-        }
-        await pipeline.exec();
+        await Promise.all(
+            entries.map(({key, value}) =>
+                ttlSeconds ? this.client.set(key, value, "EX", ttlSeconds) : this.client.set(key, value),
+            ),
+        );
     }
 
     async del(key: string): Promise<number> {
@@ -59,14 +68,24 @@ export class RedisCacheProvider implements ICacheProvider {
      * invalidation can't stall the request path that shares this connection.
      */
     async delByPattern(pattern: string): Promise<number> {
-        let cursor = "0";
+        // SCAN only walks the keyspace of the node it is sent to, so in cluster
+        // mode every primary is scanned in turn.
+        const nodes: Redis[] = this.client instanceof Cluster ? this.client.nodes("master") : [this.client];
         let removed = 0;
 
-        do {
-            const [next, keys] = await this.client.scan(cursor, "MATCH", pattern, "COUNT", 200);
-            cursor = next;
-            if (keys.length > 0) removed += await this.client.unlink(...keys);
-        } while (cursor !== "0");
+        for (const node of nodes) {
+            let cursor = "0";
+            do {
+                const [next, keys] = await node.scan(cursor, "MATCH", pattern, "COUNT", 200);
+                cursor = next;
+                // One UNLINK per key: a multi-key UNLINK fails with CROSSSLOT on
+                // a cluster-mode server unless every key shares a slot.
+                if (keys.length > 0) {
+                    const counts = await Promise.all(keys.map((key) => this.client.unlink(key)));
+                    removed += counts.reduce((sum, n) => sum + n, 0);
+                }
+            } while (cursor !== "0");
+        }
 
         return removed;
     }

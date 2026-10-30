@@ -3,12 +3,17 @@ import {container} from "../di/containers";
 import {tokens} from "../di/tokens";
 import {ICacheProvider} from "../../pkg/cache/cache.interface";
 
-export function withCache(ttl = 3600 , userScoped = false) {
+/**
+ * @param keyFn builds the cache key for a request. Defaults to method + full URL;
+ *              a route passes its own when two different URLs should share an
+ *              entry (e.g. nearby searches a few metres apart).
+ */
+export function withCache(ttl = 3600 , userScoped = false, keyFn?: (req: Request) => string) {
     return async (req: Request , res: Response, next: NextFunction) => {
         try {
             const cacheProvider: ICacheProvider = container.resolve(tokens.CacheProvider)
 
-            let key = `${req.method}:${req.originalUrl}`;
+            let key = keyFn ? keyFn(req) : `${req.method}:${req.originalUrl}`;
 
             if (userScoped) {
                 key = `${key}:${req.user?.user_id}`;

@@ -27,3 +27,6 @@ MCPServer/
 
 # Claude Code worktrees (nested anywhere)
 **/.claude/worktrees/
+
+# Local AWS experiments: task definitions here contain plaintext secrets
+aws-test/

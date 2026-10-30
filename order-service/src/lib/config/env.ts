@@ -25,6 +25,9 @@ const baseSchema = z.object({
     REDIS_HOST: z.string().default("localhost"),
     REDIS_PORT: z.string().default("6379"),
     REDIS_PASSWORD: z.string().default(""),
+    // "true" for ElastiCache with in-transit encryption / cluster mode enabled.
+    REDIS_TLS: z.string().default("false"),
+    REDIS_CLUSTER: z.string().default("false"),
 
     RABBITMQ_URL: z.string(),
     RABBITMQ_CORE_EVENTS_EXCHANGE: z.string().default("core.events"),
@@ -99,7 +102,7 @@ const baseSchema = z.object({
 
     // ---- presence (Redis-only; docs/database-design.md s3.8) ----
     // How long after an agent's last ping they still count as live. This value
-    // IS the TTL on `presence:meta:<region>:<agentId>` — nothing in code
+    // IS the TTL on `presence:{<region>}:meta:<agentId>` — nothing in code
     // compares a timestamp to decide staleness, so changing the rule is
     // changing this number. 300s = the agreed five-minute cutoff, which at a
     // 30s ping cadence tolerates nine missed pings.
@@ -233,6 +236,8 @@ export const env = {
         host: parsed.REDIS_HOST,
         port: Number(parsed.REDIS_PORT),
         password: parsed.REDIS_PASSWORD || undefined,
+        tls: parsed.REDIS_TLS === "true",
+        cluster: parsed.REDIS_CLUSTER === "true",
     },
 
     rabbit: {

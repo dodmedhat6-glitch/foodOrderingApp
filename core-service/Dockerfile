@@ -79,6 +79,12 @@ FROM node:${NODE_VERSION} AS runner
 
 ENV NODE_ENV=production
 
+# RDS enforces TLS (rds.force_ssl=1). Bake Amazon's CA bundle in so node-postgres
+# can verify the server certificate: with PGSSLMODE=require in the environment,
+# pg turns TLS on and Node checks the chain against these extra CAs.
+ADD --chmod=644 https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem /etc/ssl/certs/rds-global-bundle.pem
+ENV NODE_EXTRA_CA_CERTS=/etc/ssl/certs/rds-global-bundle.pem
+
 WORKDIR /app
 
 COPY package.json ./

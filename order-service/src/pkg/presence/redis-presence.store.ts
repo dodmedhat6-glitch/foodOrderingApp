@@ -1,4 +1,4 @@
-import type Redis from "ioredis";
+import type {RedisClient} from "../cache/redis";
 import type {
     IPresenceStore,
     PresenceCandidate,
@@ -10,8 +10,13 @@ import type {
  *
  * Two keys per namespace:
  *
- *   presence:geo:<ns>            GEO (a ZSET of geohashes) — every known member
- *   presence:meta:<ns>:<id>      HASH, TTL = livenessTtlSec — the liveness bit
+ *   presence:{<ns>}:geo          GEO (a ZSET of geohashes) — every known member
+ *   presence:{<ns>}:meta:<id>    HASH, TTL = livenessTtlSec — the liveness bit
+ *
+ * The `{<ns>}` is a cluster hash tag: only the part inside the braces is
+ * hashed, so every key of one namespace lands in the same slot. That is what
+ * keeps the pipelines below legal on a cluster-mode server, which rejects a
+ * pipeline whose keys span slots on different shards.
  *
  * The split exists because of one Redis fact: **a sorted-set member cannot
  * carry its own TTL.** Only whole keys expire. So liveness rides on the per
@@ -26,7 +31,7 @@ import type {
  */
 export class RedisPresenceStore implements IPresenceStore {
     constructor(
-        private readonly client: Redis,
+        private readonly client: RedisClient,
         /** How long after its last `touch` a member stops counting as live. */
         private readonly livenessTtlSec: number,
     ) {}
@@ -214,11 +219,11 @@ export class RedisPresenceStore implements IPresenceStore {
     }
 
     private geoKey(namespace: string): string {
-        return `presence:geo:${namespace}`;
+        return `presence:{${namespace}}:geo`;
     }
 
     private metaKey(namespace: string, memberId: number): string {
-        return `presence:meta:${namespace}:${memberId}`;
+        return `presence:{${namespace}}:meta:${memberId}`;
     }
 }
 

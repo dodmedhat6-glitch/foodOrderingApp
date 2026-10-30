@@ -9,7 +9,12 @@ import {withCache} from "../../lib/cache/withCache";
 export const branchRouter = Router();
 const branchController = container.resolve<BranchController>(tokens.BranchController);
 
-branchRouter.get('/branches/nearby',withCache(), branchController.findNearby);
+// Coordinates are snapped to 3 decimals (~110 m cells) so nearby users share one
+// cache entry; 5 min TTL because open/accepting-orders flags change during the day.
+branchRouter.get('/branches/nearby',
+    withCache(300, false, (req) =>
+        `nearby:${Number(req.query.lat).toFixed(3)}:${Number(req.query.lng).toFixed(3)}`),
+    branchController.findNearby);
 branchRouter.get('/restaurants/:restaurantId/branches', branchController.findByRestaurant);
 branchRouter.post('/restaurants/:restaurantId/branches',
     authenticate,

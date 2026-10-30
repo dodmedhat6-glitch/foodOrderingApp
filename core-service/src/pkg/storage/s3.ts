@@ -16,8 +16,9 @@ export interface S3Config {
     region: string;
     /** Bucket name, not an ARN - see env.s3.bucket, which strips the arn prefix. */
     bucket: string;
-    accessKeyId: string;
-    secretAccessKey: string;
+    /** Static keys for local development only; omit on AWS to use the instance/task role. */
+    accessKeyId?: string;
+    secretAccessKey?: string;
     /** Default lifetime for presigned URLs, in seconds. */
     signedUrlExpiresIn?: number;
 }
@@ -30,12 +31,15 @@ export class S3StorageProvider implements IStorageProvider {
     private readonly signedUrlExpiresIn: number;
 
     constructor(config: S3Config) {
+        // Both keys set -> use them (developer machine). Otherwise let the SDK
+        // resolve credentials itself: env vars, ~/.aws, then the EC2 instance
+        // role / ECS task role through the metadata endpoint.
+        const staticCredentials = config.accessKeyId && config.secretAccessKey
+            ? {accessKeyId: config.accessKeyId, secretAccessKey: config.secretAccessKey}
+            : undefined;
         this.client = new S3Client({
             region: config.region,
-            credentials: {
-                accessKeyId: config.accessKeyId,
-                secretAccessKey: config.secretAccessKey,
-            },
+            ...(staticCredentials ? {credentials: staticCredentials} : {}),
         });
         this.bucket = config.bucket;
         this.signedUrlExpiresIn = config.signedUrlExpiresIn ?? DEFAULT_SIGNED_URL_EXPIRES_IN;

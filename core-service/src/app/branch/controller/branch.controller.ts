@@ -55,7 +55,10 @@ export class BranchController {
 
     findNearby = async (req: Request, res: Response, next: NextFunction) => {
         try {
-            const results = await this.branchService.findNearby( Number(req.query.lat), Number(req.query.lng))
+            // same ~110 m cell as the cache key in routes.ts, so a cached list is
+            // exactly what any user in that cell would have got
+            const snap = (v: unknown) => Number(Number(v).toFixed(3));
+            const results = await this.branchService.findNearby(snap(req.query.lat), snap(req.query.lng))
             sendSuccess(res, results);
         } catch (err) {
             next(err);

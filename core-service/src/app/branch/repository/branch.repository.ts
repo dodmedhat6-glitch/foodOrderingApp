@@ -95,7 +95,7 @@ export async function updateBranchStatus(id: number, data: {isActive?: boolean, 
     return toEntity(row);
 }
 
-export async function findNearbyBranches(lat: number, lng: number): Promise<Branch[]> {
+export async function findNearbyBranches(lat: number, lng: number, limit = 20): Promise<Branch[]> {
     const result = await db.raw(`
        SELECT 
        b.id,
@@ -111,8 +111,12 @@ export async function findNearbyBranches(lat: number, lng: number): Promise<Bran
        r.logo_url
        FROM restaurant_branches b JOIN restaurants r ON  b.restaurant_id = r.id
        WHERE b.is_active = true AND r.status ='active'
+       -- branches that deliver to this point; ST_DWithin can use the GiST index on location
        AND ST_DWithin(b.location, ST_MakePoint(?, ?)::geography, b.delivery_radius*1000)
-    `,[lng, lat]);
+       -- nearest first: <-> walks the GiST index in distance order and stops at the LIMIT
+       ORDER BY b.location <-> ST_MakePoint(?, ?)::geography, b.id
+       LIMIT ?
+    `,[lng, lat, lng, lat, limit]);
 
     return result.rows.map(toEntity);
 }

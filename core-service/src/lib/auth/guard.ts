@@ -8,7 +8,13 @@ export function authenticate(req: Request, res: Response, next: NextFunction) {
     if (!token) {
         throw NotAuthenticated
     }
-    req.user = verifyAccessToken(token);
+    try {
+        req.user = verifyAccessToken(token);
+    } catch {
+        // expired, malformed or wrongly signed: the client must re-authenticate
+        // (or refresh) - a 401, not a server fault
+        throw NotAuthenticated
+    }
     next();
 }
 

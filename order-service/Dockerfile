@@ -46,6 +46,12 @@ FROM node:22-alpine AS runtime
 
 ENV NODE_ENV=production
 
+# RDS enforces TLS (rds.force_ssl=1). Bake Amazon's CA bundle in so node-postgres
+# can verify the server certificate: with PGSSLMODE=require in the environment,
+# pg turns TLS on and Node checks the chain against these extra CAs.
+ADD --chmod=644 https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem /etc/ssl/certs/rds-global-bundle.pem
+ENV NODE_EXTRA_CA_CERTS=/etc/ssl/certs/rds-global-bundle.pem
+
 # Migrations are read from the compiled output here: there is no src/ in this
 # image and no tsx to run .ts files. The defaults in lib/config/env.ts
 # (src/migrations, ts) are the right ones for a developer machine and the wrong

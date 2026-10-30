@@ -1,0 +1,4 @@
+# Scripts here run on Linux (CloudShell, containers). A Windows checkout with
+# CRLF endings breaks them ("bad interpreter: /bin/bash^M").
+*.sh text eol=lf
+*.js text eol=lf

@@ -22,6 +22,9 @@ const schema = z.object({
     REDIS_HOST: z.string().default("localhost"),
     REDIS_PORT: z.string().default("6379"),
     REDIS_PASSWORD: z.string().optional(),
+    // "true" for ElastiCache with in-transit encryption / cluster mode enabled.
+    REDIS_TLS: z.string().default("false"),
+    REDIS_CLUSTER: z.string().default("false"),
     RABBIT_URL: z.string().default("amqp://localhost:5672"),
     RABBIT_EXCHANGE: z.string().default("core.events"),
     RABBIT_BATCH_SIZE: z.string().default("50"),
@@ -43,12 +46,25 @@ const schema = z.object({
 const s3Schema = z.object({
     AWS_REGION: z.string().default("eu-north-1"),
     S3_BUCKET: z.string(),
-    AWS_ACCESS_KEY_ID: z.string(),
-    AWS_SECRET_ACCESS_KEY: z.string(),
+    // Optional on purpose. Set them only on a developer machine. On AWS
+    // (EC2 instance role, ECS task role) leave them unset and the SDK's
+    // default credential chain fetches short-lived, auto-rotated credentials
+    // from the metadata service - no long-lived key exists that could leak.
+    AWS_ACCESS_KEY_ID: z.string().optional(),
+    AWS_SECRET_ACCESS_KEY: z.string().optional(),
     S3_SIGNED_URL_EXPIRES_IN: z.string().default("900"),
 })
 
 const parsed = schema.parse(process.env)
+
+/**
+ * jsonwebtoken reads a *string* with no unit as milliseconds ("3600" = 3.6s),
+ * but a *number* as seconds. A bare number in the env means seconds, so hand it
+ * over as a number; values with a unit ("1h", "7d") pass through untouched.
+ */
+function toExpiry(value: string): string | number {
+    return /^\d+$/.test(value.trim()) ? Number(value) : value;
+}
 
 /**
  * S3 takes a bucket *name*; the console hands out an ARN
@@ -62,8 +78,8 @@ function toBucketName(value: string): string {
 export interface S3Env {
     region: string;
     bucket: string;
-    accessKeyId: string;
-    secretAccessKey: string;
+    accessKeyId?: string;
+    secretAccessKey?: string;
     signedUrlExpiresIn: number;
 }
 
@@ -99,8 +115,8 @@ export const env = {
     jwt: {
         refreshSecret: parsed.REFRESH_SECRET,
         accessSecret: parsed.ACCESS_SECRET,
-        accessExpires: parsed.ACCESS_EXPIRATION,
-        refreshExpires: parsed.REFRESH_EXPIRATION
+        accessExpires: toExpiry(parsed.ACCESS_EXPIRATION),
+        refreshExpires: toExpiry(parsed.REFRESH_EXPIRATION)
     },
     isProduction: process.env.NODE_ENV === "production",
 
@@ -111,7 +127,9 @@ export const env = {
     redis: {
         host: parsed.REDIS_HOST,
         port: Number(parsed.REDIS_PORT),
-        password: parsed.REDIS_PASSWORD
+        password: parsed.REDIS_PASSWORD,
+        tls: parsed.REDIS_TLS === "true",
+        cluster: parsed.REDIS_CLUSTER === "true"
     },
 
     rabbit: {
